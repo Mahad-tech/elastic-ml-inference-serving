@@ -1,11 +1,27 @@
+import asyncio
 import os
 import random
 import re
 from typing import Tuple
 
-import asyncio
-from aiohttp import FormData, ClientTimeout
+from aiohttp import ClientTimeout, FormData
 from barazmoon import BarAzmoon
+
+
+DISPATCHER_ENDPOINT = os.getenv(
+    "DISPATCHER_ENDPOINT",
+    "http://127.0.0.1:8001/add_to_queue",
+)
+
+IMAGE_DIR = os.getenv(
+    "IMAGE_DIR",
+    "./imagenet-sample-images",
+)
+
+WORKLOAD_FILE = os.getenv(
+    "WORKLOAD_FILE",
+    "workload.txt",
+)
 
 
 class ImageLoadTester(BarAzmoon):
@@ -14,26 +30,29 @@ class ImageLoadTester(BarAzmoon):
             workload=workload,
             endpoint=endpoint,
             http_method=http_method,
-            **kwargs
+            **kwargs,
         )
 
         self.image_dir = image_dir
-        self.image_paths = []
-
-        for filename in os.listdir(image_dir):
-            if filename.lower().endswith((".png", ".jpg", ".jpeg")):
-                self.image_paths.append(os.path.join(image_dir, filename))
-
-        if not self.image_paths:
-            raise ValueError(f"No images found in {image_dir}")
+        self.image_paths = self.load_image_paths()
+        self.class_counts = {}
+        self.total_confidence = 0.0
+        self.processed_count = 0
+        self.request_timeout = ClientTimeout(total=80)
 
         print(f"Found {len(self.image_paths)} images for testing")
 
-        self.class_counts = {}
-        self.average_confidence = 0
-        self.total_confidence = 0
-        self.processed_count = 0
-        self.request_timeout = ClientTimeout(total=80)
+    def load_image_paths(self):
+        image_paths = []
+
+        for filename in os.listdir(self.image_dir):
+            if filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                image_paths.append(os.path.join(self.image_dir, filename))
+
+        if not image_paths:
+            raise ValueError(f"No images found in {self.image_dir}")
+
+        return image_paths
 
     def get_request_data(self) -> Tuple[str, str]:
         image_path = random.choice(self.image_paths)
@@ -42,29 +61,26 @@ class ImageLoadTester(BarAzmoon):
 
     async def predict(self, delay, session):
         await asyncio.sleep(delay)
+
         image_id, image_path = self.get_request_data()
 
-        file_handle = None
-
         try:
-            file_handle = open(image_path, "rb")
+            with open(image_path, "rb") as image_file:
+                form_data = FormData()
+                form_data.add_field(
+                    "image",
+                    image_file,
+                    filename=os.path.basename(image_path),
+                    content_type="image/jpeg",
+                )
 
-            form_data = FormData()
-            form_data.add_field(
-                "image",
-                file_handle,
-                filename=os.path.basename(image_path),
-                content_type="image/jpeg",
-            )
-
-            async with session.post(
-                self.endpoint,
-                data=form_data,
-                timeout=self.request_timeout,
-            ) as response:
-                response_json = await response.json(content_type=None)
-                is_success = self.process_response(image_id, response_json)
-                return 1 if is_success else 0
+                async with session.post(
+                    self.endpoint,
+                    data=form_data,
+                    timeout=self.request_timeout,
+                ) as response:
+                    response_json = await response.json(content_type=None)
+                    return 1 if self.process_response(image_id, response_json) else 0
 
         except asyncio.TimeoutError:
             print(f"Timeout: {image_id} exceeded {self.request_timeout.total}s")
@@ -74,76 +90,71 @@ class ImageLoadTester(BarAzmoon):
             print(f"Error with {image_id}: {exc}")
             return 0
 
-        finally:
-            if file_handle:
-                file_handle.close()
-
     def process_response(self, image_id: str, response: dict) -> bool:
-        try:
-            print(response)
-
-            if "prediction" not in response:
-                print(f"Invalid response for {image_id}: {response}")
-                return False
-
-            prediction_str = response["prediction"]
-            match = re.match(r"([^:]+):\s*([\d.]+)%", prediction_str)
-
-            if not match:
-                print(f"Cannot parse prediction '{prediction_str}' for {image_id}")
-                return False
-
-            class_name = match.group(1).strip()
-            confidence = float(match.group(2))
-
-            self.class_counts[class_name] = self.class_counts.get(class_name, 0) + 1
-            self.total_confidence += confidence
-            self.processed_count += 1
-            self.average_confidence = self.total_confidence / self.processed_count
-
-            print(f"{image_id}: '{class_name}' {confidence:.1f}%")
-            return True
-
-        except Exception as e:
-            print(f"Response processing error for {image_id}: {e}")
+        if "prediction" not in response:
+            print(f"Invalid response for {image_id}: {response}")
             return False
 
+        prediction = response["prediction"]
+        match = re.match(r"([^:]+):\s*([\d.]+)%", prediction)
+
+        if not match:
+            print(f"Cannot parse prediction '{prediction}' for {image_id}")
+            return False
+
+        class_name = match.group(1).strip()
+        confidence = float(match.group(2))
+
+        self.class_counts[class_name] = self.class_counts.get(class_name, 0) + 1
+        self.total_confidence += confidence
+        self.processed_count += 1
+
+        print(f"{image_id}: '{class_name}' {confidence:.1f}%")
+        return True
+
     def display_results(self):
+        total = self._BarAzmoon__counter
+        successful = self._BarAzmoon__success_counter.value
+        success_rate = (successful / total * 100) if total else 0
+        average_confidence = (
+            self.total_confidence / self.processed_count
+            if self.processed_count
+            else 0
+        )
+
         print("\n----- Test Results -----")
-        print(f"Total requests    : {self._BarAzmoon__counter}")
-        print(f"Successful        : {self._BarAzmoon__success_counter.value}")
-        print(f"Avg confidence    : {self.average_confidence:.1f}%")
+        print(f"Total requests    : {total}")
+        print(f"Successful        : {successful}")
+        print(f"Success rate      : {success_rate:.1f}%")
+        print(f"Avg confidence    : {average_confidence:.1f}%")
 
-        if self.processed_count > 0:
+        if self.processed_count:
             print("\nClassification breakdown:")
-            total_success = self._BarAzmoon__success_counter.value
-
-            for cls, cnt in sorted(
+            for class_name, count in sorted(
                 self.class_counts.items(),
-                key=lambda x: x[1],
-                reverse=True
+                key=lambda item: item[1],
+                reverse=True,
             ):
-                pct = (cnt / total_success * 100) if total_success > 0 else 0
-                print(f"  {cls}: {cnt} ({pct:.1f}%)")
+                percentage = count / self.processed_count * 100
+                print(f"  {class_name}: {count} ({percentage:.1f}%)")
+
+
+def load_workload():
+    with open(WORKLOAD_FILE, "r") as file:
+        return [int(value) for value in file.read().split()]
 
 
 if __name__ == "__main__":
-    DISPATCHER_ENDPOINT = "http://127.0.0.1:8001/add_to_queue"
-    IMAGE_DIR = "./imagenet-sample-images"
-
-    with open("workload.txt", "r") as f:
-        raw = f.read().split()
-
-    experiment_workload = [int(x) for x in raw]
+    workload = load_workload()
 
     print(
-        f"Workload: {len(experiment_workload)} seconds, "
-        f"{sum(experiment_workload)} total requests, "
-        f"peak={max(experiment_workload)} req/s"
+        f"Workload: {len(workload)} seconds, "
+        f"{sum(workload)} total requests, "
+        f"peak={max(workload)} req/s"
     )
 
     tester = ImageLoadTester(
-        workload=experiment_workload,
+        workload=workload,
         endpoint=DISPATCHER_ENDPOINT,
         image_dir=IMAGE_DIR,
         timeout=30,
@@ -152,5 +163,5 @@ if __name__ == "__main__":
     total, successful = tester.start()
     tester.display_results()
 
-    success_rate = (successful / total * 100) if total > 0 else 0
+    success_rate = (successful / total * 100) if total else 0
     print(f"\nSummary: {successful}/{total} ({success_rate:.1f}%) successful requests")
