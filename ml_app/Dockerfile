@@ -1,0 +1,19 @@
+FROM python:3.11.12-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV TORCH_NUM_THREADS=1
+
+COPY requirements.txt .
+COPY ml_app/main.py .
+COPY ml_app/resnet_inference.py .
+
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 8000 9001
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

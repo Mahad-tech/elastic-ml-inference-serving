@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ds_env/
+
+# Dataset / sample images
+imagenet-sample-images/
+
+# Logs
+*.log
+
+# Editor files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Cache
+.pytest_cache/
+.mypy_cache/
