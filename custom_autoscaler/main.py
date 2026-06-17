@@ -16,8 +16,8 @@ NAMESPACE = "default"
 POLL_INTERVAL = 15
 COOLDOWN_SECONDS = 150
 MIN_REPLICAS = 1
-MAX_REPLICAS = 6
-DESIRED_QSIZE = 50
+MAX_REPLICAS = 10
+DESIRED_QSIZE = 30
 
 async def get_metric(query):
     """Get qsize from Prometheus."""
