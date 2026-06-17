@@ -8,8 +8,7 @@ ENV MKL_NUM_THREADS=1
 ENV TORCH_NUM_THREADS=1
 
 COPY requirements.txt .
-COPY ml_app/main.py .
-COPY ml_app/resnet_inference.py .
+COPY ml_app/*.py .
 
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt

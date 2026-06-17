@@ -5,8 +5,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
-COPY dispatcher/main.py .
-COPY dispatcher/dispatcher.py .
+COPY dispatcher/*.py .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
