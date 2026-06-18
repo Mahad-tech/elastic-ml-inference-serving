@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatcher-deployment
+  namespace: default
+  labels:
+    app: dispatcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dispatcher
+  template:
+    metadata:
+      labels:
+        app: dispatcher
+    spec:
+      containers:
+      - name: dispatcher-container
+        image: dispatcher:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8001 
+        - containerPort: 9090  
+        env:
+        - name: ML_API_ENDPOINT
+          value: "http://ml-app-service:5000/predict"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatcher-service
+  labels:
+    app: dispatcher
+spec:
+  type: NodePort
+  selector:
+    app: dispatcher
+  ports:
+    - name: http
+      port: 8001        
+      targetPort: 8001  # Change this to 8001 so it reaches the app!
+      nodePort: 32028
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      nodePort: 32084

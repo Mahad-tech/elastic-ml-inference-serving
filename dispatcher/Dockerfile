@@ -5,8 +5,11 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
-COPY dispatcher/main.py .
-COPY dispatcher/dispatcher.py .
+
+# Install git so pip can clone dependencies from GitHub!
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+COPY dispatcher/*.py .
 
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -21,10 +21,14 @@ logger = logging.getLogger(__name__)
 async def create_http_client() -> httpx.AsyncClient:
     """
     Create a shared async HTTP client for forwarding requests
-    to the ML inference service.
+    to the ML inference service, forcing IPv4 routing.
     """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
+        # This fixes the dual-stack loop socket drop on Windows/Minikube:
+        transport=httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0"
+        ),
         limits=httpx.Limits(
             max_connections=HTTP_MAX_CONNECTIONS,
             max_keepalive_connections=HTTP_MAX_KEEPALIVE_CONNECTIONS,
@@ -74,70 +78,73 @@ async def consumer_worker(
     print(f"Worker {worker_id} started")
 
     while workers_running_ref():
+        request_id = None
         try:
-            result, request_id = await get_inference(
-                dispatcher=dispatcher,
-                http_client=http_client,
-            )
+            # 1. Fetch from queue and isolate the request identifier first
+            request_queue = dispatcher.request_queue
+            queue_item, request_id = await request_queue.get()
 
-            print(f"Worker {worker_id} got result: {result}")
+            try:
+                # 2. Process inference explicitly linked to this specific item
+                result = await get_inference_for_item(queue_item, http_client)
+                print(f"Worker {worker_id} got result: {result}")
 
-            async with pending_requests_lock:
-                future = pending_requests.pop(request_id, None)
+                async with pending_requests_lock:
+                    future = pending_requests.pop(request_id, None)
 
-            if future and not future.done():
-                future.set_result(result)
-                print(
-                    f"Worker {worker_id} delivered result "
-                    f"to request {request_id[:8]}"
-                )
+                if future and not future.done():
+                    future.set_result(result)
+                    print(f"Worker {worker_id} delivered result to request {request_id[:8]}")
+
+            finally:
+                request_queue.task_done()
 
         except Exception as exc:
-            print(f"Worker {worker_id} error: {exc}")
-
-            async with pending_requests_lock:
-                if pending_requests:
-                    request_id = next(iter(pending_requests))
-                    future = pending_requests.pop(request_id)
-
-                    if not future.done():
-                        future.set_exception(exc)
+            print(f"Worker {worker_id} error processing request {request_id}: {exc}")
+            # 3. Only abort the specific request that actually triggered the network error!
+            if request_id:
+                async with pending_requests_lock:
+                    future = pending_requests.pop(request_id, None)
+                if future and not future.done():
+                    future.set_exception(exc)
 
         await asyncio.sleep(WORKER_SLEEP_SECONDS)
 
     print(f"Worker {worker_id} stopped")
 
 
-async def get_inference(dispatcher, http_client: httpx.AsyncClient):
-    """
-    Get one request from the queue, convert the image to JPEG bytes,
-    forward it to the ML inference service, and return the prediction.
-    """
-    request_queue = dispatcher.request_queue
+from io import BytesIO
+import socket
+from urllib.parse import urlparse
 
-    queue_item, request_id = await request_queue.get()
-
+async def get_inference_for_item(queue_item_bytes, http_client: httpx.AsyncClient):
+    """
+    Receive raw image bytes, resolve the endpoint host to bypass Docker MTU drops,
+    and forward the payload safely to the ML inference service.
+    """
+    parsed_url = urlparse(ML_API_ENDPOINT)
     try:
-        img_buffer = BytesIO()
-        queue_item.save(img_buffer, format="JPEG")
+        raw_ip = socket.gethostbyname(parsed_url.hostname)
+        target_url = f"{parsed_url.scheme}://{raw_ip}:{parsed_url.port}{parsed_url.path}"
+    except Exception as dns_err:
+        print(f"Fallback warning: DNS resolution failed: {dns_err}")
+        target_url = ML_API_ENDPOINT
 
-        files = {
-            "image": ("image.jpg", img_buffer.getvalue(), "image/jpeg")
-        }
+    # Prepare multipart form-data payload using the stable raw bytes
+    files = {
+        "image": ("image.jpg", queue_item_bytes, "image/jpeg")
+    }
 
-        img_buffer.close()
+    print(f"Forwarding image payload directly to: {target_url}")
+    
+    response = await http_client.post(
+        url=target_url,
+        files=files,
+    )
 
-        response = await http_client.post(
-            url=ML_API_ENDPOINT,
-            files=files,
-        )
-
-        response.raise_for_status()
-
-        prediction = response.json()["prediction"]
-        print(prediction)
-
-        return prediction, request_id
-
-    finally:
-        request_queue.task_done()
+    if response.status_code != 200:
+        print(f"Backend returned error status code {response.status_code}. Raw body: {response.text}")
+        
+    response.raise_for_status()
+    prediction = response.json()["prediction"]
+    return prediction
