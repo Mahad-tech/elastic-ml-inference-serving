@@ -114,42 +114,31 @@ async def home():
 
 @app.post("/add_to_queue")
 async def request_queue(image: UploadFile):
-    """
-    Producer endpoint:
-    receives an image, puts it into the queue,
-    and waits for a background worker to process it.
-    """
     request_id = str(uuid.uuid4())
-
     future = asyncio.Future()
+
+    # 1. Read the raw image bytes right here while the request context is alive!
+    image_bytes = await image.read()
 
     async with pending_requests_lock:
         pending_requests[request_id] = future
 
-    await dispatcher.add_to_queue(image, request_id)
+    # 2. Pass the stable bytes to the dispatcher instead of the fragile UploadFile object
+    await dispatcher.add_to_queue(image_bytes, request_id)
     queue_size = await dispatcher.qsize()
-
-    print(f"ml service url: {ML_SERVICE_URL}")
-    print(f"ml api endpoint: {ML_API_ENDPOINT}")
-    print(f"This is the qsize: {queue_size}")
 
     try:
         prediction = await asyncio.wait_for(
             future,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
-
-        print(f"Request {request_id[:8]} got result: {prediction}")
-
         return {
             "prediction": prediction,
             "queue_size": queue_size,
         }
-
     except asyncio.TimeoutError:
         async with pending_requests_lock:
             pending_requests.pop(request_id, None)
-
         return {
             "error": "Request timeout",
             "queue_size": queue_size,

@@ -20,11 +20,11 @@ spec:
         image: dispatcher:latest
         imagePullPolicy: Never
         ports:
-        - containerPort: 8001  # Change this to 8001 to match your code!
+        - containerPort: 8001 
         - containerPort: 9090  
         env:
         - name: ML_API_ENDPOINT
-          value: "http://10.244.0.3:8000/predict"
+          value: "http://ml-app-service:5000/predict"
 ---
 apiVersion: v1
 kind: Service
