@@ -14,3 +14,11 @@ def send(i):
 with ThreadPoolExecutor(max_workers=50) as ex:
     for i in range(500):
         ex.submit(send, i)
+
+with ThreadPoolExecutor(max_workers=50) as ex:
+    futures = [ex.submit(send, i) for i in range(500)]
+
+    for f in futures:
+        f.result()
+
+print("DONE")
