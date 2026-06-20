@@ -1,4 +1,5 @@
 import asyncio
+import os
 import httpx
 import logging
 from kubernetes import client, config
@@ -9,7 +10,7 @@ import math
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-PROMETHEUS_URL = "http://prometheus-operated.monitoring.svc:9090"
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-operated.default.svc:9090")
 DEPLOYMENT_NAME = "ml-app-deployment"
 NAMESPACE = "default"
 

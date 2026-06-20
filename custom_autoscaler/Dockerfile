@@ -7,6 +7,8 @@ WORKDIR /app
 # Copy requirements from parent directory
 COPY requirements.txt .
 
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
 # Install other dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 

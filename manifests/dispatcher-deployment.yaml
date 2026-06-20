@@ -21,10 +21,10 @@ spec:
         imagePullPolicy: Never
         ports:
         - containerPort: 8001 
-        - containerPort: 9090  
+        - containerPort: 9000  
         env:
-        - name: ML_API_ENDPOINT
-          value: "http://ml-app-service:5000/predict"
+        - name: ML_SERVICE_URL 
+          value: "http://ml-app-service:5000"
 ---
 apiVersion: v1
 kind: Service
@@ -42,6 +42,6 @@ spec:
       targetPort: 8001  # Change this to 8001 so it reaches the app!
       nodePort: 32028
     - name: metrics
-      port: 9090
-      targetPort: 9090
+      port: 9000
+      targetPort: 9000
       nodePort: 32084

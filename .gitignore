@@ -27,3 +27,4 @@ imagenet-sample-images/
 # Cache
 .pytest_cache/
 .mypy_cache/
+minikube-linux-amd64
