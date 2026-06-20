@@ -23,4 +23,4 @@ spec:
         env:
         # Override the default URL so it can reach Prometheus inside the cluster network
         - name: PROMETHEUS_URL
-          value: "http://prometheus-operated.monitoring.svc:9090"
+          value: "http://prometheus-operated.default.svc:9090"

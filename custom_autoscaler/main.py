@@ -23,8 +23,8 @@ SCALE_DOWN_COOLDOWN = 180  # Conservative drop to keep resources on to absorb tr
 
 # Scaling Boundaries
 MIN_REPLICAS = 1
-MAX_REPLICAS = 10
-DESIRED_QSIZE = 30
+MAX_REPLICAS = 6
+DESIRED_QSIZE = 2
 
 async def get_metric(query):
     """Get qsize from Prometheus."""
