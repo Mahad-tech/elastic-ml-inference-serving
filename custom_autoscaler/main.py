@@ -7,7 +7,7 @@ import time
 import math
 
 # Configure logging
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-operated.default.svc:9090")
@@ -15,16 +15,20 @@ DEPLOYMENT_NAME = "ml-app-deployment"
 NAMESPACE = "default"
 
 # Timing Controls
-POLL_INTERVAL = 15 
+POLL_INTERVAL = 5 
 
-# OPTIMIZATION: Asymmetric Cooldown Targets
-SCALE_UP_COOLDOWN = 15    # Fast response to allow subsequent scale-ups much quicker
+# Asymmetric Cooldown Targets
+SCALE_UP_COOLDOWN = 10     # Fast response to allow subsequent scale-ups much quicker
 SCALE_DOWN_COOLDOWN = 180  # Conservative drop to keep resources on to absorb traffic
 
 # Scaling Boundaries
 MIN_REPLICAS = 1
-MAX_REPLICAS = 6
-DESIRED_QSIZE = 2
+MAX_REPLICAS = 30
+DESIRED_QSIZE = 20
+
+# Core State Tracking Module Globals
+last_scale_time = 0.0
+current_cooldown = 0.0
 
 async def get_metric(query):
     """Get qsize from Prometheus."""
@@ -35,10 +39,10 @@ async def get_metric(query):
             result = response.json()
             if result["status"] == "success" and result["data"]["result"]:
                 return float(result["data"]["result"][0]["value"][1])
-            return None
+            return 0.0  # Default to 0 instead of None to prevent mathematical parsing breaks
     except Exception as e:
         logger.error(f"Error fetching metric {query}: {e}")
-        return None
+        return 0.0
 
 async def check_replicas_ready(v1_api):
     """Check if all ml-app-deployment pods are ready."""
@@ -56,18 +60,16 @@ async def check_replicas_ready(v1_api):
         logger.error(f"Error checking pod readiness: {e}")
         return False
 
-async def scale_deployment(qsize, v1_api):
-    """Scale deployment based on qsize with asymmetric cooldowns."""
+async def scale_deployment(qsize, apps_v1, v1_api):
+    """
+    Scale deployment aggressively using strict step thresholds. Bypasses 
+    ratio math traps to guarantee immediate upscaling during traffic spikes.
+    """
     global last_scale_time, current_cooldown
     
-    # Check if the active cooldown safety window (dynamic based on last action direction) has passed
-    if time.time() - last_scale_time < current_cooldown:
-        logger.info("Skipping scaling due to active stabilization/cooldown window")
-        return
-
-    # Check if all replicas are ready
-    if not await check_replicas_ready(v1_api):
-        logger.info("Skipping scaling as not all pods are ready")
+    current_time = time.time()
+    if current_time - last_scale_time < current_cooldown:
+        logger.info(f"Skipping scaling due to active cooldown window ({int(current_cooldown - (current_time - last_scale_time))}s remaining)")
         return
 
     try:
@@ -77,17 +79,26 @@ async def scale_deployment(qsize, v1_api):
         logger.error(f"Error getting replicas: {e}")
         current_replicas = 1
 
-    desired_replicas = current_replicas
-    if qsize is not None:
-        if qsize == 0:
-            desired_replicas = MIN_REPLICAS
-        elif qsize > DESIRED_QSIZE:
-            desired_replicas = math.ceil(current_replicas * (qsize / DESIRED_QSIZE))
-        elif qsize <= DESIRED_QSIZE:
-            desired_replicas = max(MIN_REPLICAS, math.ceil(current_replicas * (qsize / DESIRED_QSIZE)))
-        
-        desired_replicas = max(MIN_REPLICAS, min(MAX_REPLICAS, desired_replicas))
+    # --- BULLETPROOF THRESHOLD LOGIC ---
+    if qsize == 0:
+        # Scale down ONLY when the queue is completely clear
+        if not await check_replicas_ready(v1_api):
+            logger.info("Skipping scale-down as current replicas are stabilizing")
+            return
+        desired_replicas = max(MIN_REPLICAS, current_replicas - 1)
 
+    elif qsize <= 10:
+        # Small queue backup starting: Proactively jump to at least 3 pods
+        desired_replicas = max(current_replicas, 10)
+
+    else:
+        # Queue is over 5: Traffic surge detected! Instantly blast straight to MAX!
+        desired_replicas = MAX_REPLICAS
+
+    # Bound replicas strictly between boundaries
+    desired_replicas = max(MIN_REPLICAS, min(MAX_REPLICAS, desired_replicas))
+
+    # --- EXECUTION ---
     if desired_replicas != current_replicas:
         try:
             apps_v1.patch_namespaced_deployment_scale(
@@ -96,7 +107,6 @@ async def scale_deployment(qsize, v1_api):
                 body={"spec": {"replicas": desired_replicas}}
             )
             
-            # OPTIMIZATION: Dynamically set the next cooldown based on scaling direction
             if desired_replicas > current_replicas:
                 current_cooldown = SCALE_UP_COOLDOWN
                 direction_msg = "UP"
@@ -104,43 +114,32 @@ async def scale_deployment(qsize, v1_api):
                 current_cooldown = SCALE_DOWN_COOLDOWN
                 direction_msg = "DOWN"
                 
-            logging.getLogger().setLevel(logging.INFO)
-            logger.info(f"Scaled {DEPLOYMENT_NAME} {direction_msg} from {current_replicas} to {desired_replicas} replicas. Cooldown set to {current_cooldown}s.")
-            logging.getLogger().setLevel(logging.ERROR)
-            
+            logger.info(f"Scaled {DEPLOYMENT_NAME} {direction_msg} from {current_replicas} to {desired_replicas} replicas. Queue size: {qsize}")
             last_scale_time = time.time()
         except client.exceptions.ApiException as e:
             logger.error(f"Error scaling deployment: {e}")
     else:
-        logging.getLogger().setLevel(logging.INFO)
-        logger.info("No scaling action taken")
-        logging.getLogger().setLevel(logging.ERROR)
+        logger.info(f"No scaling action taken. Queue size: {qsize}, Replicas: {current_replica}")
 
 async def main():
-    """Run autoscaler."""
-    qsize = await get_metric('dispatcher_queue_size{job="dispatcher-service", namespace="default"}')
-    await scale_deployment(qsize, v1_api)
-
-if __name__ == "__main__":
-    logger.info("Entering infinite loop")
     try:
         config.load_incluster_config()
     except config.ConfigException:
-        logger.error("Failed to load in-cluster config, falling back to kubeconfig")
         config.load_kube_config()
         
     apps_v1 = client.AppsV1Api()
     v1_api = client.CoreV1Api()
     
-    last_scale_time = 0
-    current_cooldown = 0  # Starts at zero to allow immediate initial action
+    logger.info("Custom Metrics Queue Autoscaler initialized successfully.")
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     while True:
         try:
-            loop.run_until_complete(main())
+            qsize = await get_metric('dispatcher_queue_size{job="dispatcher-service", namespace="default"}')
+            await scale_deployment(qsize, apps_v1, v1_api)
         except Exception as e:
-            logger.error(f"Error in main loop: {e}")
-        logger.info(f"Sleeping for {POLL_INTERVAL} seconds")
-        loop.run_until_complete(asyncio.sleep(POLL_INTERVAL))
+            logger.error(f"Error in execution cycle: {e}")
+            
+        await asyncio.sleep(POLL_INTERVAL)
+
+if __name__ == "__main__":
+    asyncio.run(main())

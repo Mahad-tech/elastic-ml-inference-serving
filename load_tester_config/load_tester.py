@@ -37,6 +37,9 @@ class AsyncImageLoadTester:
         self.processed_count = 0
         self.request_timeout = ClientTimeout(total=80)
         
+        # NEW: Latency tracking repository
+        self.latencies = []
+        
         print(f"Found {len(self.image_paths)} images for testing")
 
     def load_image_paths(self):
@@ -57,6 +60,8 @@ class AsyncImageLoadTester:
         self.total_requests += 1
         image_id, image_path = self.get_request_data()
         
+        # NEW: Clock the precise start frame of this asynchronous network request
+        start_time = time.time()
         try:
             with open(image_path, "rb") as image_file:
                 form_data = FormData()
@@ -73,9 +78,18 @@ class AsyncImageLoadTester:
                     timeout=self.request_timeout,
                 ) as response:
                     response_json = await response.json(content_type=None)
+                    
+                    # NEW: Compute roundtrip time immediately upon receiving response bytes
+                    duration = time.time() - start_time
+                    
                     if self.process_response(image_id, response_json):
                         self.successful_requests += 1
+                        # Save the tracking latency duration metric for valid successes
+                        self.latencies.append(duration)
+                        
         except asyncio.TimeoutError:
+            duration = time.time() - start_time
+            self.latencies.append(duration) # Track full time out length
             print(f"Timeout: {image_id} exceeded {self.request_timeout.total}s")
         except Exception as exc:
             print(f"Error with {image_id}: {exc}")
@@ -104,9 +118,7 @@ class AsyncImageLoadTester:
 
     async def run_workload(self):
         print("\n🚀 Starting Workload Simulation...")
-        start_time = time.time()
         
-        # Limit concurrent connections so Windows Defender doesn't trip and drop sockets
         connector = aiohttp.TCPConnector(limit=100, force_close=False, enable_cleanup_closed=True)
         
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -114,7 +126,6 @@ class AsyncImageLoadTester:
                 tick_start = time.time()
 
                 if req_count > 0:
-                    # Spawn all requests for this second concurrently
                     tasks = [self.send_single_request(session) for _ in range(req_count)]
                     await asyncio.gather(*tasks)
                 
@@ -141,6 +152,33 @@ class AsyncImageLoadTester:
         print(f"Successful replies : {successful}")
         print(f"Success rate       : {success_rate:.1f}%")
         print(f"Avg model accuracy : {average_confidence:.1f}%")
+        
+        # --- NEW: ADVANCED LATENCY PERCENTILE SUMMARY LAYER ---
+        print("\n⏱️ ----- Latency Benchmarks -----")
+        if self.latencies:
+            sorted_latencies = sorted(self.latencies)
+            count = len(sorted_latencies)
+            
+            avg_latency = sum(sorted_latencies) / count
+            min_latency = sorted_latencies[0]
+            max_latency = sorted_latencies[-1]
+            
+            # Mathematical calculations for percentile tracking bounds
+            p50_idx = int(count * 0.50)
+            p90_idx = int(count * 0.90)
+            p95_idx = int(count * 0.95)
+            p99_idx = int(count * 0.99)
+            
+            print(f"Minimum Latency       : {min_latency:.4f} seconds")
+            print(f"Average (Mean) Latency: {avg_latency:.4f} seconds")
+            print(f"P50 (Median) Latency  : {sorted_latencies[p50_idx]:.4f} seconds")
+            print(f"P90 Latency           : {sorted_latencies[p90_idx]:.4f} seconds")
+            print(f"P95 Latency           : {sorted_latencies[p95_idx]:.4f} seconds")
+            print(f"P99 Latency (Tail)    : {sorted_latencies[p99_idx]:.4f} seconds")
+            print(f"Maximum Latency       : {max_latency:.4f} seconds")
+        else:
+            print("No latency profiles were collected.")
+        print("-" * 32)
 
 
 def load_workload():
