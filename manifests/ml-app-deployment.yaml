@@ -29,7 +29,7 @@ spec:
           # BURSTABLE LIMITS: Allows the pod to consume more if hardware is available
           limits:
             cpu: "1"           # Can still burst to 1 full core during execution
-            memory: "768Mi"    # Strict upper ceiling per pod to protect host system memory
+            memory: "1Gi"    # Strict upper ceiling per pod to protect host system memory
 ---
 apiVersion: v1
 kind: Service
