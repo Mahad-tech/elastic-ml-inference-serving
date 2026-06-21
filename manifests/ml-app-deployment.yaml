@@ -18,16 +18,18 @@ spec:
       containers:
       - name: ml-app-container
         image: ml-app:latest
-        imagePullPolicy: Never  # Forces Minikube to use the image
+        imagePullPolicy: Never  # Forces Minikube to use local image
         ports:
         - containerPort: 8000  # FastAPI default port
         resources:
+          # LIGHT RESOURCE REQUESTS: Allows many pods to pack onto a single laptop node
           requests:
-            cpu: "1"
-            memory: "1Gi"
+            cpu: "200m"        # Only reserves 0.2 of a CPU core initially
+            memory: "256Mi"    # Reserves 256 Megabytes instead of a whole Gigabyte
+          # BURSTABLE LIMITS: Allows the pod to consume more if hardware is available
           limits:
-            cpu: "1"
-            memory: "2Gi"
+            cpu: "1"           # Can still burst to 1 full core during execution
+            memory: "768Mi"    # Strict upper ceiling per pod to protect host system memory
 ---
 apiVersion: v1
 kind: Service
@@ -41,4 +43,4 @@ spec:
   - protocol: TCP
     port: 5000         # The port components use to talk inside the cluster
     targetPort: 8000   # Routes directly to the container's FastAPI port
-  type: ClusterIP      
+  type: ClusterIP

@@ -23,7 +23,7 @@ SCALE_DOWN_COOLDOWN = 180  # Conservative drop to keep resources on to absorb tr
 
 # Scaling Boundaries
 MIN_REPLICAS = 1
-MAX_REPLICAS = 30
+MAX_REPLICAS = 10
 DESIRED_QSIZE = 20
 
 # Core State Tracking Module Globals
@@ -89,7 +89,7 @@ async def scale_deployment(qsize, apps_v1, v1_api):
 
     elif qsize <= 10:
         # Small queue backup starting: Proactively jump to at least 3 pods
-        desired_replicas = max(current_replicas, 10)
+        desired_replicas = max(current_replicas, 5)
 
     else:
         # Queue is over 5: Traffic surge detected! Instantly blast straight to MAX!
