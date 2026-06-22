@@ -18,12 +18,12 @@ NAMESPACE = "default"
 POLL_INTERVAL = 2 
 
 # Asymmetric Cooldown Targets
-SCALE_UP_COOLDOWN = 5      # Reduced so subsequent scale-ups can trigger immediately if traffic worsens
-SCALE_DOWN_COOLDOWN = 120  # Keep resources alive long enough to absorb immediate secondary waves
+SCALE_UP_COOLDOWN = 4      # Short cooldown allows fast subsequent steps if queue continues growing
+SCALE_DOWN_COOLDOWN = 300  # 🚨 5-Minute lock: Do not scale down easily after launching pool
 
 # Scaling Boundaries
 MIN_REPLICAS = 1
-MAX_REPLICAS = 10
+MAX_REPLICAS = 15
 
 # Core State Tracking Module Globals
 last_scale_time = 0.0
@@ -62,14 +62,12 @@ async def check_replicas_ready(v1_api):
         return False
 
 async def scale_deployment(qsize, apps_v1, v1_api):
-    """Scale deployment aggressively using strict step thresholds."""
+    """Scale deployment using aggressive proportional steps with cooldown overrides."""
     global last_scale_time, current_cooldown
     
     current_time = time.time()
-    if current_time - last_scale_time < current_cooldown:
-        logger.info(f"Skipping scaling due to active cooldown window ({int(current_cooldown - (current_time - last_scale_time))}s remaining)")
-        return
-
+    elapsed_time = current_time - last_scale_time
+    
     try:
         deployment = apps_v1.read_namespaced_deployment(DEPLOYMENT_NAME, NAMESPACE)
         current_replicas = deployment.spec.replicas
@@ -77,20 +75,28 @@ async def scale_deployment(qsize, apps_v1, v1_api):
         logger.error(f"Error getting replicas: {e}")
         return
 
-    # --- AGGRESSIVE STEP THRESHOLD SCALE UP ---
+    # --- 🚨 DYNAMIC COOLDOWN OVERRIDE ENGINE ---
+    if elapsed_time < current_cooldown:
+        # If the queue is growing and backing up, SHATTER the cooldown window!
+        if qsize > 2 and current_replicas < MAX_REPLICAS:
+            logger.warning(f"🚨 TRAFFIC SURGE DETECTED (qsize={qsize})! Overriding active cooldown window.")
+        else:
+            logger.info(f"Skipping scaling due to active cooldown window ({int(current_cooldown - elapsed_time)}s remaining)")
+            return
+
+    # --- AGGRESSIVE PROPORTIONAL STEP LOGIC ---
     if qsize == 0:
         if not await check_replicas_ready(v1_api):
             logger.info("Skipping scale-down as current replicas are stabilizing")
             return
         desired_replicas = max(MIN_REPLICAS, current_replicas - 1)
-
-    elif qsize <= 5:
-        # Initial traffic wave: Instantly jump to halfway point
-        desired_replicas = max(current_replicas, 5)
-
     else:
-        # Large traffic backup: Blast straight to max capacity immediately!
-        desired_replicas = MAX_REPLICAS
+        # Cap the max step to +3 pods per individual cycle to smooth the CPU load
+        growth_step = min(math.ceil(qsize / 2), 3)
+        if growth_step < 1:
+            growth_step = 1
+            
+        desired_replicas = current_replicas + growth_step
 
     # Bound replicas strictly within boundaries
     desired_replicas = max(MIN_REPLICAS, min(MAX_REPLICAS, desired_replicas))
@@ -104,11 +110,12 @@ async def scale_deployment(qsize, apps_v1, v1_api):
                 body={"spec": {"replicas": desired_replicas}}
             )
             
+            # Set separate rules based on direction
             if desired_replicas > current_replicas:
-                current_cooldown = SCALE_UP_COOLDOWN
+                current_cooldown = SCALE_UP_COOLDOWN  # Fast subsequent adjustments (4s)
                 direction_msg = "UP"
             else:
-                current_cooldown = SCALE_DOWN_COOLDOWN
+                current_cooldown = SCALE_DOWN_COOLDOWN  # Long protection window (300s)
                 direction_msg = "DOWN"
                 
             logger.info(f"Scaled {DEPLOYMENT_NAME} {direction_msg} from {current_replicas} to {desired_replicas} replicas. Queue size: {qsize}")
@@ -116,7 +123,6 @@ async def scale_deployment(qsize, apps_v1, v1_api):
         except client.exceptions.ApiException as e:
             logger.error(f"Error scaling deployment: {e}")
     else:
-        # Fixed the missing 's' typo in current_replicas to prevent crashes
         logger.info(f"No scaling action taken. Queue size: {qsize}, Replicas: {current_replicas}")
 
 async def main():

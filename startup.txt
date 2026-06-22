@@ -119,6 +119,10 @@ kubectl rollout restart deployment ml-app-deployment
 docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
 kubectl rollout restart deployment custom-autoscaler-deployment
 
+
+
+
+
 1. Average Latency (Seconds)
 sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_response_time_seconds_count[15s]))
 

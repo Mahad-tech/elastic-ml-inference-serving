@@ -9,7 +9,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 # --------------------------------------------------------
 
 import psutil
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Request, UploadFile, Response, status
 from PIL import Image
 from prometheus_client.exposition import start_http_server
 
@@ -18,20 +18,33 @@ from metrics import CPU_USAGE, MEMORY_USAGE, REQUEST_COUNT, RESPONSE_TIME
 from resnet_inference import ModelInference
 
 app = FastAPI(title=ML_APP_TITLE)
-model = ModelInference()
 
-# Warmup the model graph with a fake image so the first request is instant
-try:
-    dummy_img = Image.new('RGB', (224, 224), color='white')
-    dummy_tensor = model.transform_image(dummy_img)
-    _ = model.predict(dummy_tensor)
-except Exception:
-    pass
+# 🚨 Readiness State Trackers
+model_ready = False
+model = None
 
 start_http_server(ML_APP_METRICS_PORT)
 
-# Background thread to collect CPU/Memory every 2 seconds asynchronously
-# This completely removes psutil overhead from the request/response path!
+@app.on_event("startup")
+async def initialize_and_warmup():
+    """Initializes model, runs dummy image inference, and marks pod warm."""
+    global model, model_ready
+    
+    # 1. Load weights into memory
+    model = ModelInference()
+    
+    # 2. Warm up the model graph with a fake image so the first real request is instant
+    try:
+        dummy_img = Image.new('RGB', (224, 224), color='white')
+        dummy_tensor = model.transform_image(dummy_img)
+        _ = model.predict(dummy_tensor)
+    except Exception:
+        pass
+        
+    # 3. Flip readiness flag ONLY after graph compile is hot
+    model_ready = True
+
+# Background thread to collect CPU/Memory every second asynchronously
 def collect_system_metrics():
     while True:
         try:
@@ -69,6 +82,15 @@ async def add_metrics(request: Request, call_next):
 @app.get("/")
 async def home():
     return {"message": "ML app is running"}
+
+# 🚨 Dedicated readiness endpoint matching our corrected YAML manifest
+@app.get("/healthz")
+async def health_check(response: Response):
+    """Returns 503 while initializing/warming graph, 200 OK when ready."""
+    if not model_ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "warming_up"}
+    return {"status": "ready"}
 
 @app.post("/predict")
 async def predict(image: UploadFile):
