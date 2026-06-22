@@ -14,17 +14,16 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-operated.default
 DEPLOYMENT_NAME = "ml-app-deployment"
 NAMESPACE = "default"
 
-# Timing Controls
-POLL_INTERVAL = 5 
+# 🏎️ Faster tracking evaluation
+POLL_INTERVAL = 2 
 
 # Asymmetric Cooldown Targets
-SCALE_UP_COOLDOWN = 10     # Fast response to allow subsequent scale-ups much quicker
-SCALE_DOWN_COOLDOWN = 180  # Conservative drop to keep resources on to absorb traffic
+SCALE_UP_COOLDOWN = 5      # Reduced so subsequent scale-ups can trigger immediately if traffic worsens
+SCALE_DOWN_COOLDOWN = 120  # Keep resources alive long enough to absorb immediate secondary waves
 
 # Scaling Boundaries
 MIN_REPLICAS = 1
 MAX_REPLICAS = 10
-DESIRED_QSIZE = 20
 
 # Core State Tracking Module Globals
 last_scale_time = 0.0
@@ -34,12 +33,12 @@ async def get_metric(query):
     """Get qsize from Prometheus."""
     try:
         async with httpx.AsyncClient() as client_session:
-            response = await client_session.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
+            response = await client_session.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3)
             response.raise_for_status()
             result = response.json()
             if result["status"] == "success" and result["data"]["result"]:
                 return float(result["data"]["result"][0]["value"][1])
-            return 0.0  # Default to 0 instead of None to prevent mathematical parsing breaks
+            return 0.0
     except Exception as e:
         logger.error(f"Error fetching metric {query}: {e}")
         return 0.0
@@ -52,6 +51,8 @@ async def check_replicas_ready(v1_api):
             label_selector="app=ml-app"
         )
         for pod in pods.items:
+            if pod.metadata.deletion_timestamp is not None:
+                continue
             for condition in pod.status.conditions or []:
                 if condition.type == "Ready" and condition.status != "True":
                     return False
@@ -61,10 +62,7 @@ async def check_replicas_ready(v1_api):
         return False
 
 async def scale_deployment(qsize, apps_v1, v1_api):
-    """
-    Scale deployment aggressively using strict step thresholds. Bypasses 
-    ratio math traps to guarantee immediate upscaling during traffic spikes.
-    """
+    """Scale deployment aggressively using strict step thresholds."""
     global last_scale_time, current_cooldown
     
     current_time = time.time()
@@ -77,25 +75,24 @@ async def scale_deployment(qsize, apps_v1, v1_api):
         current_replicas = deployment.spec.replicas
     except client.exceptions.ApiException as e:
         logger.error(f"Error getting replicas: {e}")
-        current_replicas = 1
+        return
 
-    # --- BULLETPROOF THRESHOLD LOGIC ---
+    # --- AGGRESSIVE STEP THRESHOLD SCALE UP ---
     if qsize == 0:
-        # Scale down ONLY when the queue is completely clear
         if not await check_replicas_ready(v1_api):
             logger.info("Skipping scale-down as current replicas are stabilizing")
             return
         desired_replicas = max(MIN_REPLICAS, current_replicas - 1)
 
-    elif qsize <= 10:
-        # Small queue backup starting: Proactively jump to at least 3 pods
+    elif qsize <= 5:
+        # Initial traffic wave: Instantly jump to halfway point
         desired_replicas = max(current_replicas, 5)
 
     else:
-        # Queue is over 5: Traffic surge detected! Instantly blast straight to MAX!
+        # Large traffic backup: Blast straight to max capacity immediately!
         desired_replicas = MAX_REPLICAS
 
-    # Bound replicas strictly between boundaries
+    # Bound replicas strictly within boundaries
     desired_replicas = max(MIN_REPLICAS, min(MAX_REPLICAS, desired_replicas))
 
     # --- EXECUTION ---
@@ -119,7 +116,8 @@ async def scale_deployment(qsize, apps_v1, v1_api):
         except client.exceptions.ApiException as e:
             logger.error(f"Error scaling deployment: {e}")
     else:
-        logger.info(f"No scaling action taken. Queue size: {qsize}, Replicas: {current_replica}")
+        # Fixed the missing 's' typo in current_replicas to prevent crashes
+        logger.info(f"No scaling action taken. Queue size: {qsize}, Replicas: {current_replicas}")
 
 async def main():
     try:

@@ -118,3 +118,12 @@ kubectl rollout restart deployment ml-app-deployment
 
 docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
 kubectl rollout restart deployment custom-autoscaler-deployment
+
+1. Average Latency (Seconds)
+sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_response_time_seconds_count[15s]))
+
+2. 99th Percentile (P99​) Latency (The Project Requirement)
+histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))
+
+3. Total Allocated CPU Cores (Replica Count)
+count(kube_pod_status_phase{phase="Running", pod=~"ml-app-deployment-.*"})
