@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import socket
 from io import BytesIO
+from urllib.parse import urlparse
 
 import httpx
 import psutil
@@ -14,7 +16,6 @@ from config import (
 )
 from metrics import CPU_USAGE, MEMORY_USAGE, QUEUE_SIZE
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -25,10 +26,7 @@ async def create_http_client() -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
-        # This fixes the dual-stack loop socket drop on Windows/Minikube:
-        transport=httpx.AsyncHTTPTransport(
-            local_address="0.0.0.0"
-        ),
+        transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
         limits=httpx.Limits(
             max_connections=HTTP_MAX_CONNECTIONS,
             max_keepalive_connections=HTTP_MAX_KEEPALIVE_CONNECTIONS,
@@ -56,7 +54,6 @@ async def update_system_metrics(dispatcher):
                 memory_percent,
                 queue_size,
             )
-
         except Exception as exc:
             logger.error("Error while updating system metrics: %s", exc)
 
@@ -72,50 +69,72 @@ async def consumer_worker(
     workers_running_ref,
 ):
     """
-    Continuously consume requests from the queue, forward them to the
-    ML inference service, and return results to the waiting request.
+    Continuously consume requests from the queue and instantly offload them 
+    as concurrent background network tasks without blocking the loop event thread.
     """
     print(f"Worker {worker_id} started")
 
     while workers_running_ref():
-        request_id = None
         try:
-            # 1. Fetch from queue and isolate the request identifier first
             request_queue = dispatcher.request_queue
+            # Fetch from queue instantly
             queue_item, request_id = await request_queue.get()
 
-            try:
-                # 2. Process inference explicitly linked to this specific item
-                result = await get_inference_for_item(queue_item, http_client)
-                print(f"Worker {worker_id} got result: {result}")
-
-                async with pending_requests_lock:
-                    future = pending_requests.pop(request_id, None)
-
-                if future and not future.done():
-                    future.set_result(result)
-                    print(f"Worker {worker_id} delivered result to request {request_id[:8]}")
-
-            finally:
-                request_queue.task_done()
+            # 🚀 OPTIMIZATION: Fire-and-forget background task assignment!
+            # This unlocks the worker loop immediately so it can pull the next queue item
+            asyncio.create_task(
+                process_and_deliver_inference(
+                    worker_id=worker_id,
+                    queue_item=queue_item,
+                    request_id=request_id,
+                    request_queue=request_queue,
+                    http_client=http_client,
+                    pending_requests=pending_requests,
+                    pending_requests_lock=pending_requests_lock
+                )
+            )
 
         except Exception as exc:
-            print(f"Worker {worker_id} error processing request {request_id}: {exc}")
-            # 3. Only abort the specific request that actually triggered the network error!
-            if request_id:
-                async with pending_requests_lock:
-                    future = pending_requests.pop(request_id, None)
-                if future and not future.done():
-                    future.set_exception(exc)
+            print(f"Worker {worker_id} loop encounter error: {exc}")
+            await asyncio.sleep(0.1)
 
-        await asyncio.sleep(WORKER_SLEEP_SECONDS)
+        if WORKER_SLEEP_SECONDS > 0:
+            await asyncio.sleep(WORKER_SLEEP_SECONDS)
 
     print(f"Worker {worker_id} stopped")
 
 
-from io import BytesIO
-import socket
-from urllib.parse import urlparse
+async def process_and_deliver_inference(
+    worker_id: int,
+    queue_item,
+    request_id: str,
+    request_queue: asyncio.Queue,
+    http_client: httpx.AsyncClient,
+    pending_requests: dict,
+    pending_requests_lock: asyncio.Lock
+):
+    """Handles network dispatching and future result mapping concurrently."""
+    try:
+        # Run network I/O bound processing task safely in the background
+        result = await get_inference_for_item(queue_item, http_client)
+        
+        async with pending_requests_lock:
+            future = pending_requests.pop(request_id, None)
+
+        if future and not future.done():
+            future.set_result(result)
+            
+    except Exception as exc:
+        print(f"Worker {worker_id} error processing request {request_id}: {exc}")
+        if request_id:
+            async with pending_requests_lock:
+                future = pending_requests.pop(request_id, None)
+            if future and not future.done():
+                future.set_exception(exc)
+    finally:
+        # Guarantee task completion is signaled to Prometheus tracking metrics
+        request_queue.task_done()
+
 
 async def get_inference_for_item(queue_item_bytes, http_client: httpx.AsyncClient):
     """
@@ -127,15 +146,11 @@ async def get_inference_for_item(queue_item_bytes, http_client: httpx.AsyncClien
         raw_ip = socket.gethostbyname(parsed_url.hostname)
         target_url = f"{parsed_url.scheme}://{raw_ip}:{parsed_url.port}{parsed_url.path}"
     except Exception as dns_err:
-        print(f"Fallback warning: DNS resolution failed: {dns_err}")
         target_url = ML_API_ENDPOINT
 
-    # Prepare multipart form-data payload using the stable raw bytes
     files = {
         "image": ("image.jpg", queue_item_bytes, "image/jpeg")
     }
-
-    print(f"Forwarding image payload directly to: {target_url}")
     
     response = await http_client.post(
         url=target_url,
@@ -146,5 +161,4 @@ async def get_inference_for_item(queue_item_bytes, http_client: httpx.AsyncClien
         print(f"Backend returned error status code {response.status_code}. Raw body: {response.text}")
         
     response.raise_for_status()
-    prediction = response.json()["prediction"]
-    return prediction
+    return response.json()["prediction"]

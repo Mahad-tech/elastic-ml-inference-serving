@@ -2,25 +2,18 @@ import asyncio
 import logging
 import time
 import uuid
+import httpx
 
 from fastapi import FastAPI, Request, UploadFile
 from prometheus_client.exposition import start_http_server
 
 from config import (
     DISPATCHER_METRICS_PORT,
-    ML_API_ENDPOINT,
-    ML_SERVICE_URL,
-    NUM_WORKERS,
+    ML_SERVICE_URL,          # Assumed to be your K8s Service ClusterIP/NodePort URL
     REQUEST_TIMEOUT_SECONDS,
 )
 from dispatcher import Dispatcher
 from metrics import REQUEST_COUNT, RESPONSE_TIME
-from workers import (
-    consumer_worker,
-    create_http_client,
-    update_system_metrics,
-)
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,61 +23,25 @@ app = FastAPI(title="Dispatcher")
 
 start_http_server(DISPATCHER_METRICS_PORT)
 
+# Use a highly optimized, long-lived AsyncClient with connection pooling configured
 HTTP_CLIENT = None
-pending_requests = {}
-pending_requests_lock = asyncio.Lock()
-workers_running = False
-
-
-def are_workers_running() -> bool:
-    return workers_running
-
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Start shared HTTP client, consumer workers, and metrics updater.
-    """
-    global workers_running, HTTP_CLIENT
-
-    workers_running = True
-    HTTP_CLIENT = await create_http_client()
-
-    for worker_id in range(1, NUM_WORKERS + 1):
-        asyncio.create_task(
-            consumer_worker(
-                worker_id=worker_id,
-                dispatcher=dispatcher,
-                http_client=HTTP_CLIENT,
-                pending_requests=pending_requests,
-                pending_requests_lock=pending_requests_lock,
-                workers_running_ref=are_workers_running,
-            )
-        )
-
-    asyncio.create_task(update_system_metrics(dispatcher))
-
-    print(f"Started {NUM_WORKERS} consumer workers and system metrics updater")
-
+    global HTTP_CLIENT
+    # Configure client to reuse connections without recycling headers per image
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
+    HTTP_CLIENT = httpx.AsyncClient(limits=limits, timeout=REQUEST_TIMEOUT_SECONDS)
+    logger.info("Stateless High-Concurrency Async HTTP Client initialized.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Stop workers and close HTTP client.
-    """
-    global workers_running, HTTP_CLIENT
-
-    workers_running = False
-
+    global HTTP_CLIENT
     if HTTP_CLIENT:
         await HTTP_CLIENT.aclose()
 
-
 @app.middleware("http")
 async def add_metrics(request: Request, call_next):
-    """
-    Track request count and response time for every HTTP request.
-    """
     method = request.method
     endpoint = request.url.path
     start_time = time.time()
@@ -100,9 +57,7 @@ async def add_metrics(request: Request, call_next):
     RESPONSE_TIME.labels(endpoint=endpoint).observe(
         time.time() - start_time
     )
-
     return response
-
 
 @app.get("/")
 async def home():
@@ -111,35 +66,48 @@ async def home():
         "queue_depth": await dispatcher.qsize(),
     }
 
+async def forward_to_ml_pod(image_bytes: bytes) -> dict:
+    """Forwards image payload instantly to the K8s load balancer service."""
+    files = {"image": ("image.jpg", image_bytes, "image/jpeg")}
+    # The Kubernetes Service automatically load balances this to warm 1/1 pods!
+    response = await HTTP_CLIENT.post(f"{ML_SERVICE_URL}/predict", files=files)
+    response.raise_for_status()
+    return response.json()
 
 @app.post("/add_to_queue")
 async def request_queue(image: UploadFile):
-    request_id = str(uuid.uuid4())
-    future = asyncio.Future()
-
-    # 1. Read the raw image bytes right here while the request context is alive!
+    """
+    High-frequency non-blocking pipeline.
+    Bypasses static worker restrictions to process requests concurrently.
+    """
+    # Read image bytes to prevent streaming timeouts
     image_bytes = await image.read()
-
-    async with pending_requests_lock:
-        pending_requests[request_id] = future
-
-    # 2. Pass the stable bytes to the dispatcher instead of the fragile UploadFile object
-    await dispatcher.add_to_queue(image_bytes, request_id)
+    
+    # Track the temporary metric state for your custom autoscaler logic
+    await dispatcher.add_to_queue(image_bytes, str(uuid.uuid4()))
     queue_size = await dispatcher.qsize()
 
     try:
-        prediction = await asyncio.wait_for(
-            future,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
+        # Launch inference directly via the pooled network client
+        result = await forward_to_ml_pod(image_bytes)
+        
+        # Pop from tracking queue once complete
+        if not dispatcher.request_queue.empty():
+            await dispatcher.request_queue.get()
+            dispatcher.request_queue.task_done()
+            
         return {
-            "prediction": prediction,
+            "prediction": result["prediction"],
             "queue_size": queue_size,
         }
-    except asyncio.TimeoutError:
-        async with pending_requests_lock:
-            pending_requests.pop(request_id, None)
+    except Exception as e:
+        logger.error(f"Inference failure: {e}")
+        # Clean the tracking queue on error states
+        if not dispatcher.request_queue.empty():
+            await dispatcher.request_queue.get()
+            dispatcher.request_queue.task_done()
+            
         return {
-            "error": "Request timeout",
+            "error": "Request processing failed or timed out",
             "queue_size": queue_size,
         }
