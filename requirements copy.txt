@@ -1,0 +1,54 @@
+# Core Web Framework & Server
+fastapi==0.115.12
+starlette==0.46.2
+uvicorn==0.34.3
+python-multipart==0.0.20
+
+# HTTP Clients & Networking
+httpx==0.28.1
+httpcore==1.0.9
+aiohttp==3.9.5
+yarl==1.20.0
+multidict==6.4.4
+anyio==4.9.0
+sniffio==1.3.1
+idna==3.10
+certifi==2025.4.26
+h11==0.16.0
+aiohappyeyeballs==2.6.1
+aiosignal==1.3.2
+frozenlist==1.6.2
+
+# Data Science, Math & Image Processing
+numpy==1.26.3
+pillow==11.0.0
+mpmath==1.3.0
+sympy==1.13.3
+networkx==3.3
+fsspec==2024.6.1
+filelock==3.13.1
+attrs==25.3.0
+propcache==0.3.1
+
+# Deep Learning / ML Stack (Clean CPU Version)
+torch
+torchvision
+torchaudio
+
+# Data Validation & Utilities
+pydantic==2.11.5
+pydantic_core==2.33.2
+annotated-types==0.7.0
+click==8.2.1
+Jinja2==3.1.4
+MarkupSafe==2.1.5
+typing-inspection==0.4.1
+typing_extensions==4.14.0
+
+# Monitoring & Infrastructure Tools
+psutil
+prometheus-client
+kubernetes
+
+# Custom Load Tester Package
+barazmoon @ git+https://github.com/reconfigurable-ml-pipeline/load_tester

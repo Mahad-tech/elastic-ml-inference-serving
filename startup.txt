@@ -1,0 +1,120 @@
+!!Activate your Python virtual environment!!
+.\.venv\Scripts\Activate.ps1
+
+Start docker desktop. 
+
+# 1. Wipe out the old restricted cluster configuration
+minikube delete
+
+# 2. Fire up the fresh cluster with massive hardware headroom
+minikube start --cpus=4 --memory=7680m --driver=docker
+
+# 3. Bind your terminal shell context to Minikube's internal Docker registry
+minikube docker-env | Invoke-Expression
+docker ps
+
+# 4. Build all 4 operational container layers
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+docker build -t dispatcher:latest -f dispatcher/Dockerfile .
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+docker build -t load-tester:local -f load_tester_config/Dockerfile.tester .
+
+# 5. Install the Prometheus Operator core CRDs
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/bundle.yaml
+
+@"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: python-client-sa-admin-binding
+subjects:
+- kind: ServiceAccount
+  name: python-client-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+"@ | kubectl apply -f -
+
+
+# 6. Deploy your core applications, the database instance, and the autoscaler
+kubectl apply -f manifests/ml-app-deployment.yaml
+kubectl apply -f manifests/prometheus-rbac.yaml
+kubectl apply -f manifests/dispatcher-deployment.yaml
+kubectl apply -f manifests/prometheus-instance.yaml
+kubectl apply -f manifests/custom-autoscaler-deployment.yaml
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus-operator --timeout=120s
+
+# 7. Launch the Dispatcher Tunnel in a background window
+Start-Process powershell -ArgumentList "kubectl port-forward svc/dispatcher-service 8001:8001"
+Start-Process powershell -ArgumentList "kubectl port-forward svc/prometheus-operated 9090:9090"
+
+# 8. Start Load Tester
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+
+# 9. Dynamic status watch (Press Ctrl + C once all say 1/1 or 2/2 Running)
+kubectl get pods -w
+
+# 10. Logs 
+kubectl logs -l job-name=load-tester-job -f
+kubectl logs deployment/dispatcher-deployment --tail=20
+kubectl logs deployment/ml-app-deployment --tail=30
+kubectl logs deploy/custom-autoscaler-deployment --tail=30
+
+# 11. Monitoring (Run directly in terminal)
+
+"timestamp,replicas,p99_latency,queue_size" | Out-File -FilePath experiment_custom_autoscaler.csv -Encoding utf8
+
+while ($true) {
+    $Timestamp = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    
+    # 1. Fetch current active ML replica count
+    $Replicas = (kubectl get deployment ml-app-deployment -o jsonpath='{.spec.replicas}')
+    
+    # 2. Query Prometheus for the TRUE 99th percentile dispatcher processing latency
+    $LatResponse = Invoke-RestMethod -Uri "http://localhost:9090/api/v1/query?query=histogram_quantile(0.99,+sum(rate(dispatcher_response_time_seconds_bucket[1m]))+by+(le))"
+    $Latency = "0.0"
+    if ($null -ne $LatResponse.data.result -and $LatResponse.data.result.Count -gt 0) {
+        $Latency = $LatResponse.data.result[0].value[1]
+    }
+    
+    # 3. Query Prometheus for the real-time queue size gauge
+    $QueueResponse = Invoke-RestMethod -Uri "http://localhost:9090/api/v1/query?query=dispatcher_queue_size"
+    $Queue = "0"
+    if ($null -ne $QueueResponse.data.result -and $QueueResponse.data.result.Count -gt 0) {
+        $Queue = $QueueResponse.data.result[0].value[1]
+    }
+    
+    # Output progress cleanly
+    $LogLine = "$Timestamp,$Replicas,$Latency,$Queue"
+    Write-Output $LogLine
+    $LogLine | Out-File -FilePath experiment_custom_autoscaler.csv -Append -Encoding utf8
+    
+    Start-Sleep -Seconds 10
+}
+
+
+
+Minikube Issues if improperly deleted or removed. 
+# 1. Force remove the broken cluster profiles from memory
+minikube delete --all --purge
+
+# 2. Hard delete the hidden cached SSH/machine state files from your user profile directory
+Remove-Item -Recurse -Force C:\Users\sumit\.minikube
+
+# 3. Clean up any stuck network definitions hidden inside your local context
+minikube update-context
+
+# 4. kubectl delete deployments,jobs,statefulsets --all
+
+
+
+kubectl scale deployment ml-app-deployment --replicas=1
+
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+kubectl rollout restart deployment ml-app-deployment
+
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+kubectl rollout restart deployment custom-autoscaler-deployment
