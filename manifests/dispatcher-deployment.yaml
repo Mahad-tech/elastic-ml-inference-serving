@@ -20,11 +20,36 @@ spec:
         image: dispatcher:latest
         imagePullPolicy: Never
         ports:
-        - containerPort: 8001 
-        - containerPort: 9000  
+        - containerPort: 8001
+          name: http
+        - containerPort: 9000
+          name: metrics
         env:
         - name: ML_SERVICE_URL 
           value: "http://ml-app-service:5000"
+        - name: PYTHONUNBUFFERED
+          value: "1"  # Forces instant log flushes so your metrics update immediately
+        resources:
+          # ULTRA-LIGHT SAFETY LIMITS (Prevents your RAM from maxing out)
+          requests:
+            cpu: "100m"        # Reserves only 10% of a core
+            memory: "128Mi"    # Reserves 128MB instead of the senior's massive 2Gi
+          limits:
+            cpu: "500m"        # Limits processing bursts to half a core
+            memory: "256Mi"    # Strict protective ceiling
+        # HEALTH MONITORS (Allows Kubernetes to manage stability and track readiness)
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8001
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8001
+          initialDelaySeconds: 5
+          periodSeconds: 5
 ---
 apiVersion: v1
 kind: Service
@@ -39,7 +64,7 @@ spec:
   ports:
     - name: http
       port: 8001        
-      targetPort: 8001  # Change this to 8001 so it reaches the app!
+      targetPort: 8001  
       nodePort: 32028
     - name: metrics
       port: 9000
