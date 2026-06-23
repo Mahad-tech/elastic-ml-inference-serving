@@ -130,8 +130,7 @@ docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
 kubectl rollout restart deployment custom-autoscaler-deployment
 kubectl logs custom-autoscaler-deployment-799dc844-k7pq2 | select -first 5
 
-
-
+kubectl get pods -w
 
 
 1. Average Latency (Seconds)
