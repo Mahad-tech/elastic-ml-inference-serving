@@ -117,7 +117,7 @@ class AsyncImageLoadTester:
         return True
 
     async def run_workload(self):
-        print("\n🚀 Starting Workload Simulation...")
+        print("\nStarting Workload Simulation")
         
         connector = aiohttp.TCPConnector(limit=100, force_close=False, enable_cleanup_closed=True)
         

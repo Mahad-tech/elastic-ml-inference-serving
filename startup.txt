@@ -1,5 +1,5 @@
 !!Activate your Python virtual environment!!
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1
 
 Start docker desktop. 
 
@@ -66,6 +66,7 @@ kubectl apply -f manifests/load-tester-job.yaml
 
 # 9. Dynamic status watch (Press Ctrl + C once all say 1/1 or 2/2 Running)
 kubectl get pods -w
+kubectl logs custom-autoscaler-deployment-7d8f44bb77-jtm5p -f
 
 # 10. Logs 
 kubectl logs -l job-name=load-tester-job -f
@@ -105,6 +106,12 @@ while ($true) {
     Start-Sleep -Seconds 10
 }
 
+#FOR RERUN
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+kubectl rollout restart deployment custom-autoscaler-deployment
+kubectl scale deployment ml-app-deployment --replicas=1
+
+
 
 
 Minikube Issues if improperly deleted or removed. 
@@ -119,8 +126,9 @@ minikube update-context
 
 # 4. kubectl delete deployments,jobs,statefulsets --all
 
-
-
+#FOR RERUN
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+kubectl rollout restart deployment custom-autoscaler-deployment
 kubectl scale deployment ml-app-deployment --replicas=1
 
 docker build -t ml-app:latest -f ml-app/Dockerfile .
@@ -128,7 +136,7 @@ kubectl rollout restart deployment ml-app-deployment
 
 docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
 kubectl rollout restart deployment custom-autoscaler-deployment
-kubectl logs custom-autoscaler-deployment-799dc844-k7pq2 | select -first 5
+kubectl logs custom-autoscaler-deployment-84f8cb45d8-2fj67 -f | select -first 5
 
 kubectl get pods -w
 
@@ -138,6 +146,3 @@ sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_respo
 
 2. 99th Percentile (P99​) Latency (The Project Requirement)
 histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))
-
-3. Total Allocated CPU Cores (Replica Count)
-count(kube_pod_status_phase{phase="Running", pod=~"ml-app-deployment-.*"})
