@@ -23,7 +23,7 @@ SCALE_DOWN_COOLDOWN = 180  # Keep resources alive to absorb trailing waves
 
 # Scaling Boundaries & SLO Thresholds
 MIN_REPLICAS = 1
-MAX_REPLICAS = 8
+MAX_REPLICAS = 6
 TARGET_LATENCY = 0.45      # < 0.5s assignment threshold
 
 # State Tracking Module Globals
@@ -93,7 +93,7 @@ async def scale_deployment(current_latency, apps_v1, v1_api):
     else:
         # Proportional expansion based on how far latency has slipped
         latency_ratio = current_latency / TARGET_LATENCY
-        growth_step = min(math.ceil(current_replicas * (latency_ratio - 1)), 3)
+        growth_step = min(math.ceil(current_replicas * (latency_ratio - 1)), 4)
         
         if growth_step < 2:
             growth_step = 2  # Dynamically deploy 2 pods minimum to handle waves quickly

@@ -30,8 +30,8 @@ spec:
           failureThreshold: 15   # Max time allowed for downloading/loading model weights
         resources:
           requests:
-            cpu: "200m"        # Reserves 0.2 of a CPU core initially
-            memory: "256Mi"    # Reserves 256 Megabytes
+            cpu: "500m"        # Reserves 0.5 of a CPU core initially
+            memory: "512Mi"    # Reserves 512 Megabytes
           limits:
             cpu: "1"           # Can burst to 1 full core during busy inference requests
             memory: "768Mi"    # Strict upper ceiling per pod

@@ -66,7 +66,7 @@ kubectl apply -f manifests/load-tester-job.yaml
 
 # 9. Dynamic status watch (Press Ctrl + C once all say 1/1 or 2/2 Running)
 kubectl get pods -w
-kubectl logs custom-autoscaler-deployment-7d8f44bb77-jtm5p -f
+kubectl logs custom-autoscaler-deployment-7844667444-cqpkn -f
 
 # 10. Logs 
 kubectl logs -l job-name=load-tester-job -f
