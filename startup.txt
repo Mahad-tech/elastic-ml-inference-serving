@@ -7,20 +7,28 @@ Start docker desktop.
 minikube delete
 
 # 2. Fire up the fresh cluster with massive hardware headroom
-minikube start --cpus=4 --memory=7680m --driver=docker
+minikube start --cpus=4 --memory=7000 --driver=docker
 
 # 3. Bind your terminal shell context to Minikube's internal Docker registry
 minikube docker-env | Invoke-Expression
 docker ps
 
 # 4. Build all 4 operational container layers
-docker build -t ml-app:latest -f ml-app/Dockerfile .
-docker build -t dispatcher:latest -f dispatcher/Dockerfile .
-docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
-docker build -t load-tester:local -f load_tester_config/Dockerfile.tester .
+docker build --no-cache -t ml-app:latest -f ml-app/Dockerfile .
+docker build --no-cache -t dispatcher:latest -f dispatcher/Dockerfile .
+docker build --no-cache -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+docker build --no-cache -t load-tester:local -f load_tester_config/Dockerfile.tester .
 
 # 5. Install the Prometheus Operator core CRDs
 kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/bundle.yaml
+
+@"
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: python-client-sa
+  namespace: default
+"@ | kubectl apply -f -
 
 @"
 apiVersion: rbac.authorization.k8s.io/v1
@@ -46,7 +54,10 @@ kubectl apply -f manifests/prometheus-instance.yaml
 kubectl apply -f manifests/custom-autoscaler-deployment.yaml
 kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus-operator --timeout=120s
 
-# 7. Launch the Dispatcher Tunnel in a background window
+#check and make sure custom_autoscaler is deployed 
+kubectl get deployment custom-autoscaler-deployment
+
+# 7. Launch the Dispatcher Tunnel in a background window (dont close the windows)
 Start-Process powershell -ArgumentList "kubectl port-forward svc/dispatcher-service 8001:8001"
 Start-Process powershell -ArgumentList "kubectl port-forward svc/prometheus-operated 9090:9090"
 
