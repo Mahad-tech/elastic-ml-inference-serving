@@ -1,0 +1,465 @@
+  ELASTIC ML INFERENCE SERVING — LINUX STARTUP GUIDE
+  Includes: Deployment, Grafana, HPA Experiments
+
+
+!! Activate your Python virtual environment !!
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+
+TERMINAL 1 — SETUP & DEPLOY (Main Control Terminal)
+
+
+# 1. Start Minikube with enough resources
+minikube delete
+minikube start --cpus=4 --memory=7000m --driver=docker
+
+# 2. Point shell to Minikube's internal Docker registry
+eval $(minikube docker-env)
+docker ps
+
+# 3. Install Prometheus Operator CRDs
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/bundle.yaml
+
+# 4. Create ServiceAccount and ClusterRoleBinding for autoscaler
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: python-client-sa
+  namespace: default
+EOF
+
+kubectl apply -f - << 'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: python-client-sa-admin-binding
+subjects:
+- kind: ServiceAccount
+  name: python-client-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+# 5. Build all 4 container images
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+docker build -t dispatcher:latest -f dispatcher/Dockerfile .
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+docker build -t load-tester:local -f load_tester_config/Dockerfile.tester .
+
+# 6. Deploy all components
+kubectl apply -f manifests/ml-app-deployment.yaml
+kubectl apply -f manifests/prometheus-rbac.yaml
+kubectl apply -f manifests/dispatcher-deployment.yaml
+kubectl apply -f manifests/prometheus-instance.yaml
+kubectl apply -f manifests/custom-autoscaler-deployment.yaml
+kubectl apply -f manifests/grafana.yaml
+
+# 7. Install kube-state-metrics (needed for Replicas panel in Grafana)
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/kube-state-metrics/main/examples/standard/cluster-role.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/kube-state-metrics/main/examples/standard/cluster-role-binding.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/kube-state-metrics/main/examples/standard/service-account.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/kube-state-metrics/main/examples/standard/deployment.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/kube-state-metrics/main/examples/standard/service.yaml
+
+# 8. Add ServiceMonitor for kube-state-metrics
+kubectl apply -f - << 'EOF'
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics
+  namespace: default
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+    - kube-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  endpoints:
+  - port: http
+EOF
+
+# 9. Wait for Prometheus Operator to be ready
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus-operator --timeout=120s
+
+# 10. Watch all pods come up (Ctrl+C once all show Running)
+kubectl get pods -w
+
+# 11. Verify custom autoscaler is deployed
+kubectl get deployment custom-autoscaler-deployment
+
+# 12. Start load tester
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+
+# 13. Watch load tester logs
+kubectl logs -l job-name=load-tester-job -f
+
+
+
+TERMINAL 2 — PORT FORWARDS (Keep this terminal open always)
+
+
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+kill $(lsof -t -i:8001) 2>/dev/null
+kill $(lsof -t -i:9090) 2>/dev/null
+kill $(lsof -t -i:3000) 2>/dev/null
+
+kubectl port-forward svc/dispatcher-service 8001:8001 &
+kubectl port-forward svc/prometheus-operated 9090:9090 &
+kubectl port-forward svc/grafana-service 3000:3000 &
+sleep 3
+
+echo "Dispatcher: http://localhost:8001"
+echo "Prometheus: http://localhost:9090"
+echo "Grafana:    http://localhost:3000  (admin/admin)"
+
+
+
+TERMINAL 3 — GRAFANA SETUP (Run once after port forwards are up)
+
+
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+# Wait for Grafana to fully start
+sleep 15
+
+# Add Prometheus as data source
+curl -s -X POST http://admin:admin@localhost:3000/api/datasources \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Prometheus",
+    "type": "prometheus",
+    "url": "http://prometheus-operated.default.svc:9090",
+    "access": "proxy",
+    "isDefault": true
+  }' | python3 -m json.tool
+
+# Create Autoscaler Comparison Dashboard
+curl -s -X POST http://admin:admin@localhost:3000/api/dashboards/db \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dashboard": {
+      "id": null,
+      "uid": "autoscaler-comparison",
+      "title": "Autoscaler Comparison Dashboard",
+      "tags": ["autoscaler", "latency", "kubernetes"],
+      "timezone": "browser",
+      "schemaVersion": 16,
+      "refresh": "5s",
+      "time": {"from": "now-30m", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "99th Percentile Latency (P99) - SLO Target: 0.5s",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 0, "w": 24, "h": 10},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))",
+              "legendFormat": "P99 Latency",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.90, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))",
+              "legendFormat": "P90 Latency",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))",
+              "legendFormat": "P50 Latency",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "yellow", "value": 0.3},
+                  {"color": "red", "value": 0.5}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "ML App Replicas (CPU Cores in Use)",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+          "targets": [
+            {
+              "expr": "kube_deployment_spec_replicas{deployment=\"ml-app-deployment\"}",
+              "legendFormat": "Replicas",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "max": 6
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Dispatcher Queue Size",
+          "type": "timeseries",
+          "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+          "targets": [
+            {
+              "expr": "dispatcher_queue_size",
+              "legendFormat": "Queue Size",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Average Latency",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 18, "w": 12, "h": 8},
+          "targets": [
+            {
+              "expr": "sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_response_time_seconds_count[15s]))",
+              "legendFormat": "Avg Latency",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        },
+        {
+          "id": 5,
+          "title": "Request Rate (req/s)",
+          "type": "timeseries",
+          "gridPos": {"x": 12, "y": 18, "w": 12, "h": 8},
+          "targets": [
+            {
+              "expr": "sum(rate(dispatcher_requests_total[15s]))",
+              "legendFormat": "Requests/sec",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "reqps"}}
+        },
+        {
+          "id": 6,
+          "title": "Live Stats",
+          "type": "stat",
+          "gridPos": {"x": 0, "y": 26, "w": 24, "h": 4},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[1m])) by (le))",
+              "legendFormat": "P99 Latency",
+              "refId": "A"
+            },
+            {
+              "expr": "kube_deployment_spec_replicas{deployment=\"ml-app-deployment\"}",
+              "legendFormat": "Replicas",
+              "refId": "B"
+            },
+            {
+              "expr": "dispatcher_queue_size",
+              "legendFormat": "Queue",
+              "refId": "C"
+            },
+            {
+              "expr": "sum(rate(dispatcher_requests_total[1m]))",
+              "legendFormat": "Req/s",
+              "refId": "D"
+            }
+          ]
+        }
+      ]
+    },
+    "overwrite": true,
+    "folderId": 0
+  }' | python3 -m json.tool
+
+# Open dashboard in browser
+xdg-open http://localhost:3000/d/autoscaler-comparison
+
+
+
+TERMINAL 4 — AUTOSCALER LOGS + METRICS COLLECTION
+
+
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+# Option A: Watch autoscaler logs
+kubectl logs -l app=custom-autoscaler -f
+
+# Option B: Collect metrics to CSV (use during experiments)
+echo "timestamp,replicas,p99_latency,queue_size" > experiment_custom_autoscaler.csv
+
+while true; do
+    TIMESTAMP=$(date +%s)
+    REPLICAS=$(kubectl get deployment ml-app-deployment -o jsonpath='{.spec.replicas}')
+    LATENCY=$(curl -s "http://localhost:9090/api/v1/query?query=histogram_quantile(0.99,sum(rate(dispatcher_response_time_seconds_bucket[1m]))by(le))" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['result'][0]['value'][1] if d['data']['result'] else '0.0')" 2>/dev/null)
+    QUEUE=$(curl -s "http://localhost:9090/api/v1/query?query=dispatcher_queue_size" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['result'][0]['value'][1] if d['data']['result'] else '0')" 2>/dev/null)
+    echo "$TIMESTAMP,$REPLICAS,$LATENCY,$QUEUE" | tee -a experiment_custom_autoscaler.csv
+    sleep 10
+done
+
+
+
+TERMINAL 5 — HPA EXPERIMENTS
+
+
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+# ---- EXPERIMENT 2: HPA 70% CPU ----
+
+# Stop custom autoscaler
+kubectl scale deployment custom-autoscaler-deployment --replicas=0
+
+# Reset ml-app to 1 replica
+kubectl scale deployment ml-app-deployment --replicas=1
+
+# Apply HPA 70%
+kubectl apply -f manifests/hpa-70.yaml
+kubectl get hpa -w
+# Wait 30 seconds for HPA to initialize then Ctrl+C
+
+# Run load tester
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+kubectl logs -l job-name=load-tester-job -f
+# Take Grafana screenshot when load test is running
+
+# ---- EXPERIMENT 3: HPA 90% CPU ----
+
+# Remove HPA 70%
+kubectl delete hpa --all
+
+# Reset ml-app to 1 replica
+kubectl scale deployment ml-app-deployment --replicas=1
+
+# Apply HPA 90%
+kubectl apply -f manifests/hpa-90.yaml
+kubectl get hpa -w
+# Wait 30 seconds for HPA to initialize then Ctrl+C
+
+# Run load tester
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+kubectl logs -l job-name=load-tester-job -f
+# Take Grafana screenshot when load test is running
+
+# ---- RESTORE CUSTOM AUTOSCALER ----
+kubectl delete hpa --all
+kubectl scale deployment ml-app-deployment --replicas=1
+kubectl scale deployment custom-autoscaler-deployment --replicas=1
+
+
+
+TERMINAL 6 — DEBUG & RERUN COMMANDS
+
+
+cd ~/elastic-ml-inference-serving
+source .venv/bin/activate
+
+# Check all pods
+kubectl get pods -A
+
+# Check specific logs
+kubectl logs deployment/dispatcher-deployment --tail=20
+kubectl logs deployment/ml-app-deployment --tail=30
+kubectl logs deploy/custom-autoscaler-deployment --tail=30
+
+# Prometheus queries for manual verification
+# 1. Average Latency
+curl -s "http://localhost:9090/api/v1/query?query=sum(rate(dispatcher_response_time_seconds_sum[15s]))/sum(rate(dispatcher_response_time_seconds_count[15s]))" | python3 -m json.tool
+
+# 2. P99 Latency
+curl -s "http://localhost:9090/api/v1/query?query=histogram_quantile(0.99,sum(rate(dispatcher_response_time_seconds_bucket[15s]))by(le))" | python3 -m json.tool
+
+# 3. Queue size
+curl -s "http://localhost:9090/api/v1/query?query=dispatcher_queue_size" | python3 -m json.tool
+
+# 4. Replicas
+curl -s "http://localhost:9090/api/v1/query?query=kube_deployment_spec_replicas{deployment=\"ml-app-deployment\"}" | python3 -m json.tool
+
+# Rebuild and restart autoscaler
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+kubectl rollout restart deployment custom-autoscaler-deployment
+kubectl scale deployment ml-app-deployment --replicas=1
+
+# Rebuild and restart ml-app
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+kubectl rollout restart deployment ml-app-deployment
+
+# Rebuild and restart dispatcher
+docker build -t dispatcher:latest -f dispatcher/Dockerfile .
+kubectl rollout restart deployment dispatcher-deployment
+
+
+
+MINIKUBE ISSUES — IF CLUSTER IS BROKEN
+
+
+# Force remove broken cluster
+minikube delete --all --purge
+
+# Delete hidden cached state
+rm -rf ~/.minikube
+
+# Clean up context
+minikube update-context
+
+# Delete all deployments and jobs
+kubectl delete deployments,jobs,statefulsets --all
+
+
+
+TERMINAL SUMMARY
+
+
+Terminal 1 | Build, deploy, run load tester         | Can close after load tester starts
+Terminal 2 | Port forwards                          | NEVER close
+Terminal 3 | Grafana setup — run once               | After dashboard opens
+Terminal 4 | Autoscaler logs + CSV metrics          | Keep open during experiments
+Terminal 5 | HPA experiments                        | Use when switching to HPA
+Terminal 6 | Debug, rerun, verify commands          | As needed
+
+
+
+GRAFANA DASHBOARD URL
+
+http://localhost:3000/d/autoscaler-comparison
+Login: admin / admin
+
+Panels:
+- 99th Percentile Latency (P99/P90/P50) vs 0.5s SLO
+- ML App Replicas (CPU Cores in Use)
+- Dispatcher Queue Size
+- Average Latency
+- Request Rate (req/s)
+- Live Stats (P99, Replicas, Queue, Req/s)
+
+
+
+PROMETHEUS QUERIES USED IN AUTOSCALER
+
+
+Average Latency:
+sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_response_time_seconds_count[15s]))
+
+P99 Latency:
+histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))
