@@ -23,7 +23,7 @@ SCALE_DOWN_COOLDOWN = 180  # Keep resources alive to absorb trailing waves
 
 # Scaling Boundaries & SLO Thresholds
 MIN_REPLICAS = 1
-MAX_REPLICAS = 6
+MAX_REPLICAS = 8
 TARGET_LATENCY = 0.45      # < 0.5s assignment threshold
 
 # State Tracking Module Globals
