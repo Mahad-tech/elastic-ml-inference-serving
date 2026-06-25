@@ -26,11 +26,11 @@ spec:
         - name: ML_SERVICE_URL 
           value: "http://ml-app-service:5000"
         - name: NUM_WORKERS
-          value: "30"                          # Enough workers to completely saturate your 15 scaled pod slots
+          value: "30"                          
         - name: HTTP_MAX_CONNECTIONS
           value: "500"                         # Prevents backups at the dispatcher's network interface card
         - name: HTTP_MAX_KEEPALIVE_CONNECTIONS
-          value: "100"                         # Enables socket reuse to drop your tail-latency to a minimum
+          value: "100"                         
         - name: WORKER_SLEEP_SECONDS
           value: "0.0"                         # Eliminates any synthetic loop delays inside consumer tasks
 ---

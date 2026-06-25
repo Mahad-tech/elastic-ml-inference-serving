@@ -80,8 +80,8 @@ async def consumer_worker(
             # Fetch from queue instantly
             queue_item, request_id = await request_queue.get()
 
-            # 🚀 OPTIMIZATION: Fire-and-forget background task assignment!
-            # This unlocks the worker loop immediately so it can pull the next queue item
+
+            # ynlocks the worker loop immediately so it can pull the next queue item
             asyncio.create_task(
                 process_and_deliver_inference(
                     worker_id=worker_id,

@@ -37,7 +37,7 @@ class AsyncImageLoadTester:
         self.processed_count = 0
         self.request_timeout = ClientTimeout(total=80)
         
-        # NEW: Latency tracking repository
+        # Latency tracking
         self.latencies = []
         
         print(f"Found {len(self.image_paths)} images for testing")
@@ -60,7 +60,7 @@ class AsyncImageLoadTester:
         self.total_requests += 1
         image_id, image_path = self.get_request_data()
         
-        # NEW: Clock the precise start frame of this asynchronous network request
+        # Clock the precise start of this asynchronous network request
         start_time = time.time()
         try:
             with open(image_path, "rb") as image_file:
@@ -79,7 +79,7 @@ class AsyncImageLoadTester:
                 ) as response:
                     response_json = await response.json(content_type=None)
                     
-                    # NEW: Compute roundtrip time immediately upon receiving response bytes
+                    # Compute roundtrip time immediately upon receiving response bytes
                     duration = time.time() - start_time
                     
                     if self.process_response(image_id, response_json):
@@ -152,8 +152,7 @@ class AsyncImageLoadTester:
         print(f"Successful replies : {successful}")
         print(f"Success rate       : {success_rate:.1f}%")
         print(f"Avg model accuracy : {average_confidence:.1f}%")
-        
-        # --- NEW: ADVANCED LATENCY PERCENTILE SUMMARY LAYER ---
+
         print("\n⏱️ ----- Latency Benchmarks -----")
         if self.latencies:
             sorted_latencies = sorted(self.latencies)
@@ -192,7 +191,7 @@ if __name__ == "__main__":
     # Create an argument parser to read terminal flags like --url
     parser = argparse.ArgumentParser(description="Async Image Load Tester")
     parser.add_argument("--url", type=str, help="The target endpoint URL")
-    parser.add_argument("--workload", type=str, help="The workload file") # Ignored for now since we use the fallback string path
+    parser.add_argument("--workload", type=str, help="The workload file")
     args = parser.parse_args()
 
     workload = load_workload()
@@ -206,7 +205,7 @@ if __name__ == "__main__":
     # Use the --url flag if provided, otherwise fall back to the environment variable path
     endpoint_url = args.url if args.url else DISPATCHER_ENDPOINT
     
-    # Ensure it appends /add_to_queue if the raw domain port was passed
+    # Ensure appends /add_to_queue if the raw domain port was passed
     if not endpoint_url.endswith("/add_to_queue"):
         endpoint_url = endpoint_url.rstrip("/") + "/add_to_queue"
 
@@ -218,6 +217,5 @@ if __name__ == "__main__":
         image_dir=IMAGE_DIR,
     )
 
-    # Execute using the native Python asynchronous runtime loop
     asyncio.run(tester.run_workload())
     tester.display_results()

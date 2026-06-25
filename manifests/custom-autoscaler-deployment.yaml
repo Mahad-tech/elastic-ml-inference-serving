@@ -15,7 +15,7 @@ spec:
       labels:
         app: custom-autoscaler
     spec:
-      serviceAccountName: python-client-sa  # Connects with your applied RBAC role bindings
+      serviceAccountName: python-client-sa  # Connects with applied RBAC role bindings
       containers:
       - name: autoscaler-container
         image: autoscaler:latest

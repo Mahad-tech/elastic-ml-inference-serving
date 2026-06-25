@@ -25,4 +25,4 @@ spec:
       app: dispatcher
   endpoints:
   - port: metrics
-    interval: 5s  # Scrape your queue depth metrics rapidly every 5 seconds
+    interval: 5s  # Scrape queue depth metrics rapidly every 5 seconds

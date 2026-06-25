@@ -19,7 +19,7 @@ POLL_INTERVAL = 2
 
 # Asymmetric Cooldown Targets
 SCALE_UP_COOLDOWN = 4      
-SCALE_DOWN_COOLDOWN = 180  # Keep resources alive to absorb trailing waves
+SCALE_DOWN_COOLDOWN = 180 
 
 # Scaling Boundaries & SLO Thresholds
 MIN_REPLICAS = 1
@@ -31,7 +31,7 @@ last_scale_time = 0.0
 current_cooldown = 0.0
 
 async def get_metric(query):
-    """Fetch calculated float values from Prometheus."""
+    """Fetch calculated values from Prometheus."""
     try:
         async with httpx.AsyncClient() as client_session:
             response = await client_session.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3)
@@ -73,15 +73,15 @@ async def scale_deployment(current_latency, apps_v1, v1_api):
         logger.error(f"Error getting replicas: {e}")
         return
 
-    # --- 🚨 DYNAMIC COOLDOWN OVERRIDE ENGINE ---
+    #Ensure SLO violation is fixed and cooldown doenst hamper it.
     if elapsed_time < current_cooldown:
         if current_latency > TARGET_LATENCY and current_replicas < MAX_REPLICAS:
-            logger.warning(f"🚨 LATENCY SLO VIOLATION ({current_latency:.3f}s)! Overriding cooldown lock.")
+            logger.warning(f"LATENCY SLO VIOLATION ({current_latency:.3f}s)! Overriding cooldown lock.")
         else:
             logger.info(f"Skipping scaling due to active cooldown window ({int(current_cooldown - elapsed_time)}s remaining)")
             return
 
-    # --- LATENCY-DRIVEN PROPORTIONAL CALCULATION ---
+    #LATENCY based calculation.
     if current_latency <= 0.05 or current_latency < TARGET_LATENCY:
         if current_latency == 0.0 or current_latency < 0.1:
             if not await check_replicas_ready(v1_api):
@@ -91,18 +91,18 @@ async def scale_deployment(current_latency, apps_v1, v1_api):
         else:
             desired_replicas = current_replicas
     else:
-        # Proportional expansion based on how far latency has slipped
+        # Proportional expansion based on how far latency has slipped.
         latency_ratio = current_latency / TARGET_LATENCY
         growth_step = min(math.ceil(current_replicas * (latency_ratio - 1)), 4)
         
         if growth_step < 2:
-            growth_step = 2  # Dynamically deploy 2 pods minimum to handle waves quickly
+            growth_step = 2  # Dynamically deploy 2 pods minimum.
             
         desired_replicas = current_replicas + growth_step
 
     desired_replicas = max(MIN_REPLICAS, min(MAX_REPLICAS, desired_replicas))
 
-    # --- EXECUTION ---
+    #EXECUTION
     if desired_replicas != current_replicas:
         try:
             apps_v1.patch_namespaced_deployment_scale(
@@ -132,8 +132,7 @@ async def main():
         
     apps_v1 = client.AppsV1Api()
     v1_api = client.CoreV1Api()
-    
-    # Instant label-free metrics query
+
     latency_promql = (
         'sum(dispatcher_response_time_seconds_sum) '
         '/ sum(dispatcher_response_time_seconds_count)'

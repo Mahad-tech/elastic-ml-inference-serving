@@ -9,7 +9,6 @@ spec:
       - name: load-tester
         image: load-tester:local
         imagePullPolicy: Never
-        # We switch the URL to target the exact endpoint port the pod uses
         command: ["python", "load_tester_config/load_tester.py", "--url", "http://dispatcher-service:8001/add_to_queue"]
       restartPolicy: Never
   backoffLimit: 0

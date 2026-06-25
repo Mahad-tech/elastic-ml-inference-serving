@@ -3,10 +3,10 @@ import time
 import os
 import threading
 
-# --- CRITICAL PERFORMANCE OPTIMIZATION FOR SINGLE CORE ---
+# PERFORMANCE OPTIMIZATION FOR SINGLE CORE
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
-# --------------------------------------------------------
+
 
 import psutil
 from fastapi import FastAPI, Request, UploadFile, Response, status
@@ -19,7 +19,7 @@ from resnet_inference import ModelInference
 
 app = FastAPI(title=ML_APP_TITLE)
 
-# 🚨 Readiness State Trackers
+
 model_ready = False
 model = None
 
@@ -83,7 +83,6 @@ async def add_metrics(request: Request, call_next):
 async def home():
     return {"message": "ML app is running"}
 
-# 🚨 Dedicated readiness endpoint matching our corrected YAML manifest
 @app.get("/healthz")
 async def health_check(response: Response):
     """Returns 503 while initializing/warming graph, 200 OK when ready."""

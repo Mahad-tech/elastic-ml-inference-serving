@@ -9,7 +9,7 @@ from prometheus_client.exposition import start_http_server
 
 from config import (
     DISPATCHER_METRICS_PORT,
-    ML_SERVICE_URL,          # Assumed to be your K8s Service ClusterIP/NodePort URL
+    ML_SERVICE_URL,          # K8s Service ClusterIP/NodePort URL
     REQUEST_TIMEOUT_SECONDS,
 )
 from dispatcher import Dispatcher
@@ -23,7 +23,6 @@ app = FastAPI(title="Dispatcher")
 
 start_http_server(DISPATCHER_METRICS_PORT)
 
-# Use a highly optimized, long-lived AsyncClient with connection pooling configured
 HTTP_CLIENT = None
 
 @app.on_event("startup")
@@ -69,7 +68,7 @@ async def home():
 async def forward_to_ml_pod(image_bytes: bytes) -> dict:
     """Forwards image payload instantly to the K8s load balancer service."""
     files = {"image": ("image.jpg", image_bytes, "image/jpeg")}
-    # The Kubernetes Service automatically load balances this to warm 1/1 pods!
+    # The Kubernetes Service automatically load balances this
     response = await HTTP_CLIENT.post(f"{ML_SERVICE_URL}/predict", files=files)
     response.raise_for_status()
     return response.json()
@@ -83,7 +82,7 @@ async def request_queue(image: UploadFile):
     # Read image bytes to prevent streaming timeouts
     image_bytes = await image.read()
     
-    # Track the temporary metric state for your custom autoscaler logic
+    # Track the temporary metric state for custom autoscaler logic
     await dispatcher.add_to_queue(image_bytes, str(uuid.uuid4()))
     queue_size = await dispatcher.qsize()
 
