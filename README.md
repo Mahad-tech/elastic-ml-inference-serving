@@ -1,471 +1,427 @@
 # Elastic ML Inference Serving
+**TU Ilmenau — Cloud Computing SS2026**
+Mahad Ahmad [72470] · Sumit Shrivastava [70484]
+Supervisors: Peter Amthor & Wenfei Huang
 
-A modular machine learning inference pipeline for serving image classification requests using a ResNet18 model, a FastAPI-based inference service, an asynchronous dispatcher, and a load testing client.
+## What This Project Does
 
-The system is designed to receive image requests, queue them through a dispatcher, forward them to the inference service, and return classification results in a consistent response format.
+This project builds a complete elastic ML inference serving system on Kubernetes (Minikube). It classifies images using a ResNet18 model and automatically scales the number of inference replicas based on real-time latency — comparing a custom latency-driven autoscaler against Kubernetes' built-in Horizontal Pod Autoscaler (HPA).
 
----
+## System Architecture
 
-## Overview
+```
+Load Tester
+    |
+    | POST /add_to_queue
+    v
+Dispatcher Service (port 8001)
+    |
+    | POST /predict  (via Kubernetes Service load balancing)
+    v
+ML App Replicas (port 8000)  [1 to 10 replicas]
+    |
+    v
+Prediction Response
 
-This project implements an end-to-end image inference serving pipeline with the following major components:
+Monitoring:
+Dispatcher & ML App --> Prometheus --> Grafana
+                    Prometheus --> Custom Autoscaler --> scales ML App replicas
+```
 
-* **ResNet18 Inference Service**
+All components run inside a single Minikube cluster.
 
-  * FastAPI service for image classification.
-  * Uses a pretrained ResNet18 model.
-  * Performs image preprocessing before inference.
-  * Returns predictions with class name and confidence score.
-
-* **Dispatcher Service**
-
-  * FastAPI service that receives client requests.
-  * Uses an asynchronous request queue.
-  * Starts background workers to process queued requests.
-  * Forwards images to the inference service.
-  * Maps prediction results back to the original request.
-
-* **Load Tester**
-
-  * Sends image requests to the dispatcher.
-  * Uses a workload file to control request rate.
-  * Tracks successful predictions and classification statistics.
-
-* **Instrumentation**
-
-  * Tracks request count, queue size, CPU usage, memory usage, and response latency.
-
----
 
 ## Project Structure
 
-```text
+```
 elastic-ml-inference-serving/
 │
-├── ml_app/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── metrics.py
+├── ml-app/                         # ML inference service (source + Dockerfile)
+│   ├── Dockerfile
 │   ├── main.py
 │   ├── resnet_inference.py
-│   └── Dockerfile
-│
-├── dispatcher/
-│   ├── __init__.py
 │   ├── config.py
 │   ├── metrics.py
+│   └── __init__.py
+│
+│
+├── dispatcher/                     # Dispatcher service
+│   ├── Dockerfile
+│   ├── main.py
 │   ├── dispatcher.py
 │   ├── workers.py
-│   ├── main.py
-│   └── Dockerfile
+│   ├── main_accepted_backup.py
+│   ├── config.py
+│   ├── metrics.py
+│   └── __init__.py
 │
-├── load_tester_config/
-│   ├── __init__.py
-│   └── load_tester.py
+├── custom_autoscaler/              # Latency-driven autoscaler
+│   ├── Dockerfile
+│   └── autoscaler.py
 │
+├── load_tester_config/             # Load testing client
+│   ├── Dockerfile.tester
+│   ├── load_tester.py
+│   ├── load.py
+│   ├── simple_load.py
+│   └── __init__.py
+│
+├── manifests/                      # Kubernetes manifests
+│   ├── ml-app-deployment.yaml
+│   ├── dispatcher-deployment.yaml
+│   ├── custom-autoscaler-deployment.yaml
+│   ├── prometheus-instance.yaml
+│   ├── prometheus-rbac.yaml
+│   ├── grafana.yaml
+│   ├── hpa-70.yaml
+│   └── hpa-90.yaml
+│   └── load-tester-job.yaml
+│
+├── workload.txt                    # Bursty workload schedule (3–18 req/s, 630s)
+├── workload_2x.txt                 # 2x intensity variant
+├── workload_original.txt           # Original baseline workload
 ├── requirements.txt
-├── workload.txt
-├── README.md
-└── .gitignore
+├── linux_startup.txt               # Full Linux deployment guide
+├── win_startup.txt                 # Full Windows deployment guide
+├── test.jpg                        # Sample image for manual testing
+└── experiment_*.csv                # Collected metrics per experiment
 ```
 
----
-
-## Architecture
-
-```text
-Client / Load Tester
-        |
-        | POST /add_to_queue
-        v
-Dispatcher Service
-        |
-        | asyncio.Queue
-        v
-Background Consumer Workers
-        |
-        | POST /predict
-        v
-ResNet18 Inference Service
-        |
-        v
-Prediction Response
-```
-
----
 
 ## Components
 
-### 1. ML Inference Service
+### 1. ML Inference Service (ml-app)
 
-The ML inference service is implemented using FastAPI and exposes the following endpoints:
+FastAPI service running ResNet18 image classification.
 
-```text
-GET  /
-POST /predict
+Endpoints:
+```
+GET  /         Health message
+GET  /healthz  Readiness probe (503 until model is warm, then 200)
+POST /predict  Accepts uploaded image, returns predicted class + confidence
 ```
 
-The `/predict` endpoint accepts an uploaded image, preprocesses it, runs inference using a pretrained ResNet18 model, and returns the predicted class with confidence.
+Key design decisions:
+- Model loaded once at startup with a dummy warm-up inference to avoid cold-start latency on first real request.
+- `/healthz` returns 503 until warm-up completes, keeping the pod out of Kubernetes load balancing until ready.
+- `torch.set_num_threads(1)` enforced to match the 1-CPU-per-replica resource limit and avoid thread contention.
+- Prometheus metrics exposed on a separate port (9001).
+- Resources: 500m CPU request, 1 CPU limit, 768Mi memory limit per replica.
 
 Example response:
-
 ```json
-{
-  "prediction": "tench: 97.2%"
-}
+{"prediction": "golden retriever: 87.3%"}
 ```
 
 ---
 
-### 2. Image Preprocessing
+### 2. Dispatcher Service (dispatcher)
 
-Before inference, each input image is processed using the standard ResNet18 ImageNet preprocessing pipeline:
+FastAPI service that acts as the single entry point for all traffic.
 
-1. Convert image to RGB.
-2. Resize the image.
-3. Center crop to 224x224.
-4. Convert the image to a tensor.
-5. Normalize using ImageNet mean and standard deviation.
-6. Add a batch dimension.
-
-The model is loaded once and reused for all requests to avoid unnecessary overhead.
-
----
-
-### 3. Dispatcher Service
-
-The dispatcher is responsible for request intake, queueing, and forwarding.
-
-It exposes:
-
-```text
-GET  /
-POST /add_to_queue
+Endpoints:
+```
+GET  /              Returns current queue depth
+POST /add_to_queue  Accepts image, queues it, forwards to ML App, returns prediction
 ```
 
-The `/add_to_queue` endpoint receives image requests from clients, assigns each request a unique ID, stores the request in an asynchronous queue, and waits for a background worker to process it.
-
-Each queue item contains:
-
-```text
-(PIL image, request_id)
-```
-
-This request ID is used to match the prediction result back to the original client request.
+Key design decisions:
+- Uses a shared `httpx.AsyncClient` with connection pooling (100 keep-alive, 500 max connections) for efficient concurrent forwarding.
+- Forwards requests to `ML_SERVICE_URL` — a Kubernetes Service ClusterIP — so Kubernetes handles load balancing across ML App replicas automatically.
+- Maintains an `asyncio.Queue` internally for queue-depth visibility and metrics.
+- Prometheus metrics exposed on port 9000, including `dispatcher_response_time_seconds` histogram — this is the key signal used by the custom autoscaler.
+- Exposed externally via NodePort 32028 (HTTP) and 32084 (metrics).
 
 Example response:
-
 ```json
-{
-  "prediction": "tench: 97.2%",
-  "queue_size": 1
-}
+{"prediction": "golden retriever: 87.3%", "queue_size": 2}
 ```
-
-The `queue_size` value represents the queue depth observed after the request has been added to the queue.
 
 ---
 
-### 4. Background Workers
+### 3. Custom Autoscaler (custom_autoscaler)
 
-The dispatcher starts multiple background workers. Each worker continuously:
+Latency-driven autoscaler that polls Prometheus every 2 seconds and scales ML App replicas up or down based on average response latency.
 
-1. Reads an item from the request queue.
-2. Converts the image into JPEG bytes.
-3. Sends the image to the ML inference service.
-4. Receives the prediction response.
-5. Resolves the waiting client request using the request ID.
+Scaling logic:
+- Scaling signal: cumulative average latency via PromQL on `dispatcher_response_time_seconds` histogram.
+- Scale-up formula: `growth_step = ceil(replicas × (latency_ratio − 1))`, minimum +2 pods per event.
+- Scale-up cooldown: 4 seconds (fast response to load spikes).
+- Scale-down cooldown: 180 seconds (prevents oscillation on trailing load).
+- SLO override: if latency exceeds SLO threshold during cooldown, bypass cooldown and force immediate scale-up.
+- Replica range: 1 minimum, 10 maximum.
 
-This producer-consumer design separates request intake from inference processing and allows the dispatcher to handle concurrent workloads more effectively.
+PromQL queries used:
+```
+Average latency:
+sum(rate(dispatcher_response_time_seconds_sum[15s])) / sum(rate(dispatcher_response_time_seconds_count[15s]))
+
+P99 latency:
+histogram_quantile(0.99, sum(rate(dispatcher_response_time_seconds_bucket[15s])) by (le))
+```
 
 ---
 
-### 5. Load Tester
+### 4. Load Tester (load_tester_config)
 
-The load tester sends image requests to the dispatcher using a configurable workload file.
+Async load testing client that replays a time-series workload schedule against the dispatcher.
 
-It reads images from a local image directory and sends each request as a multipart form upload using the field name:
+- Reads `workload.txt` for request rate over time (3–18 req/s, 630 seconds total).
+- Picks random images from `imagenet-sample-images/`.
+- Fires async HTTP POSTs to dispatcher `/add_to_queue` using `aiohttp`.
+- Records per-request latency for P50/P90/P99/Max calculation.
+- Results saved as `experiment_*.csv` files.
+- Runs as a Kubernetes Job via `manifests/load-tester-job.yaml`.
 
-```text
-image
-```
+---
 
-The load tester validates prediction responses and prints a summary containing:
+### 5. Monitoring (Prometheus + Grafana)
 
-* Total requests
-* Successful requests
-* Success rate
-* Average confidence
-* Classification breakdown
+Prometheus scrapes metrics from both the dispatcher (port 9000) and ML App (port 9001) every few seconds.
+
+Grafana dashboard available at `http://localhost:3000/d/autoscaler-comparison` (login: admin / admin).
+
+Dashboard panels:
+- P99 / P90 / P50 latency vs 0.5s SLO line
+- ML App replica count over time
+- Dispatcher queue size
+- Average latency
+- Request rate (req/s)
+- Live stats summary
 
 ---
 
 ## Configuration
 
-The project uses environment variables for runtime configuration.
+### ML App Environment Variables
 
-### Dispatcher Configuration
+| Variable | Default | Description |
+|---|---|---|
+| ML_APP_PORT | 8000 | FastAPI port |
+| ML_APP_METRICS_PORT | 9001 | Prometheus metrics port |
+| TORCH_NUM_THREADS | 1 | PyTorch intra-op threads |
+| TORCH_NUM_INTEROP_THREADS | 1 | PyTorch inter-op threads |
 
-| Variable                  |                 Default | Description                                          |
-| ------------------------- | ----------------------: | ---------------------------------------------------- |
-| `ML_SERVICE_URL`          | `http://127.0.0.1:8000` | URL of the ML inference service                      |
-| `NUM_WORKERS`             |                    `10` | Number of dispatcher background workers              |
-| `HTTP_TIMEOUT_SECONDS`    |                    `30` | Timeout for dispatcher-to-ML requests                |
-| `REQUEST_TIMEOUT_SECONDS` |                    `60` | Maximum time a client request waits for a prediction |
-| `DISPATCHER_METRICS_PORT` |                  `9000` | Dispatcher metrics port                              |
+### Dispatcher Environment Variables
 
-### ML App Configuration
+| Variable | Default | Description |
+|---|---|---|
+| ML_SERVICE_URL | http://127.0.0.1:8000 | ML App Kubernetes Service URL |
+| NUM_WORKERS | 10 | Background consumer workers |
+| HTTP_TIMEOUT_SECONDS | 30 | Per-request HTTP timeout |
+| DISPATCHER_METRICS_PORT | 9000 | Prometheus metrics port |
+| HTTP_MAX_CONNECTIONS | 500 | Max HTTP connections in pool |
+| HTTP_MAX_KEEPALIVE_CONNECTIONS | 100 | Max keep-alive connections |
 
-| Variable                    | Default | Description                        |
-| --------------------------- | ------: | ---------------------------------- |
-| `ML_APP_METRICS_PORT`       |  `9001` | ML app metrics port                |
-| `TORCH_NUM_THREADS`         |     `1` | Number of PyTorch CPU threads      |
-| `TORCH_NUM_INTEROP_THREADS` |     `1` | Number of PyTorch inter-op threads |
+### Load Tester Environment Variables
 
-### Load Tester Configuration
-
-| Variable              |                              Default | Description                      |
-| --------------------- | -----------------------------------: | -------------------------------- |
-| `DISPATCHER_ENDPOINT` | `http://127.0.0.1:8001/add_to_queue` | Dispatcher endpoint              |
-| `IMAGE_DIR`           |           `./imagenet-sample-images` | Directory containing test images |
-| `WORKLOAD_FILE`       |                       `workload.txt` | Workload file path               |
-
----
-
-## Local Setup
-
-### 1. Create a virtual environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 2. Install dependencies
-
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-Install CPU-only PyTorch and TorchVision:
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-```
-
-Install the load testing library:
-
-```bash
-pip install git+https://github.com/reconfigurable-ml-pipeline/load_tester
-```
-
-### 3. Download sample images
-
-```bash
-git clone https://github.com/EliSchwartz/imagenet-sample-images.git
-```
+| Variable | Default | Description |
+|---|---|---|
+| DISPATCHER_ENDPOINT | http://127.0.0.1:8001/add_to_queue | Dispatcher target URL |
+| IMAGE_DIR | ./imagenet-sample-images | Sample images directory |
+| WORKLOAD_FILE | workload.txt | Workload schedule file |
 
 ---
 
-## Running the Project Locally
+## Experiments
 
-### Terminal 1: Start the ML inference service
+Three experiments were run against the same 630-second bursty workload (3–18 req/s, 5868 total requests):
 
-```bash
-cd ml_app
-source ../.venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
+| Experiment | Strategy | Signal | Config |
+|---|---|---|---|
+| E1 | Custom Autoscaler | Avg latency | Poll 2s, SLO 0.45s, min step +2 |
+| E2 | HPA 70% CPU | CPU utilisation | Target 70%, min 1, max 10 replicas |
+| E3 | HPA 90% CPU | CPU utilisation | Target 90%, min 1, max 10 replicas |
 
-Check that it is running:
+Results summary (all strategies, 100% success rate):
 
-```bash
-curl http://localhost:8000/
-```
+| Strategy | Avg | P50 | P90 | P99 | Max |
+|---|---|---|---|---|---|
+| Custom (E1) | 0.4603s | 0.3809s | 0.8228s | 1.5091s | 2.5093s |
+| HPA 70% (E2) | 0.4817s | 0.4279s | 0.8070s | 0.9219s | 1.1370s |
+| HPA 90% (E3) | 0.4768s | 0.4123s | 0.8201s | 0.9021s | 1.0051s |
 
-Expected response:
-
-```json
-{
-  "message": "ML app is running"
-}
-```
+Custom autoscaler wins on average and median latency — meets the 0.5s SLO. HPA 90% wins on tail latency (P99/Max).
 
 ---
 
-### Terminal 2: Start the dispatcher
+## Deployment (Linux)
 
+For the full step-by-step deployment guide see `linux_startup.txt`. For Windows see `win_startup.txt`. Quick summary below.
+
+**Prerequisites:** Docker Desktop, Minikube, kubectl, Python 3.11+
+
+**Step 1 — Start Minikube**
 ```bash
-cd dispatcher
-source ../.venv/bin/activate
-ML_SERVICE_URL=http://127.0.0.1:8000 uvicorn main:app --host 0.0.0.0 --port 8001
+minikube delete
+minikube start --cpus=4 --memory=7000m --driver=docker
+eval $(minikube docker-env)
 ```
 
-Check that it is running:
-
+**Step 2 — Install Prometheus Operator CRDs**
 ```bash
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/bundle.yaml
+```
+
+**Step 3 — Create ServiceAccount for autoscaler**
+```bash
+kubectl create serviceaccount python-client-sa
+kubectl create clusterrolebinding python-client-sa-admin-binding \
+  --clusterrole=cluster-admin \
+  --serviceaccount=default:python-client-sa
+```
+
+**Step 4 — Build all Docker images**
+```bash
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+docker build -t dispatcher:latest -f dispatcher/Dockerfile .
+docker build -t autoscaler:latest -f custom_autoscaler/Dockerfile .
+docker build -t load-tester:local -f load_tester_config/Dockerfile.tester .
+```
+
+**Step 5 — Deploy all components**
+```bash
+kubectl apply -f manifests/ml-app-deployment.yaml
+kubectl apply -f manifests/prometheus-rbac.yaml
+kubectl apply -f manifests/dispatcher-deployment.yaml
+kubectl apply -f manifests/prometheus-instance.yaml
+kubectl apply -f manifests/custom-autoscaler-deployment.yaml
+kubectl apply -f manifests/grafana.yaml
+```
+
+**Step 6 — Port forward services (keep terminal open)**
+```bash
+kubectl port-forward svc/dispatcher-service 8001:8001 &
+kubectl port-forward svc/prometheus-operated 9090:9090 &
+kubectl port-forward svc/grafana 3000:3000 &
+```
+
+**Step 7 — Verify everything is running**
+```bash
+kubectl get pods -A
 curl http://localhost:8001/
 ```
 
-Expected response:
+---
 
-```json
-{
-  "message": "This is the DISPATCHER APP",
-  "queue_depth": 0
-}
+## Running Experiments
+
+**Experiment 1 — Custom Autoscaler (default, already deployed)**
+```bash
+kubectl scale deployment ml-app-deployment --replicas=1
+kubectl scale deployment custom-autoscaler-deployment --replicas=1
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+kubectl logs -l job-name=load-tester-job -f
 ```
+
+**Experiment 2 — HPA 70% CPU**
+```bash
+kubectl scale deployment custom-autoscaler-deployment --replicas=0
+kubectl scale deployment ml-app-deployment --replicas=1
+kubectl apply -f manifests/hpa-70.yaml
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+```
+
+**Experiment 3 — HPA 90% CPU**
+```bash
+kubectl delete hpa --all
+kubectl scale deployment ml-app-deployment --replicas=1
+kubectl apply -f manifests/hpa-90.yaml
+kubectl delete job load-tester-job --ignore-not-found
+kubectl apply -f manifests/load-tester-job.yaml
+```
+
+Reset between experiments: always scale ML App back to 1 replica and disable the previous autoscaler before starting the next experiment.
 
 ---
 
-### Terminal 3: Send a test request
+## Manual Testing
 
-From the project root:
-
+Send a single test image directly to the dispatcher:
 ```bash
 curl -X POST http://localhost:8001/add_to_queue \
-  -F "image=@imagenet-sample-images/n01440764_tench.JPEG"
+  -F "image=@test.jpg"
 ```
 
-Expected response format:
-
-```json
-{
-  "prediction": "tench: 97.2%",
-  "queue_size": 1
-}
-```
-
-The exact confidence score may vary.
-
----
-
-## Running the Load Tester
-
-From the project root:
-
+Send directly to the ML App (bypassing dispatcher):
 ```bash
-source .venv/bin/activate
-python load_tester_config/load_tester.py
+curl -X POST http://localhost:8000/predict \
+  -F "image=@test.jpg"
 ```
 
-Example output:
-
-```text
-Workload: 10 seconds, 10 total requests, peak=1 req/s
-Found 1000 images for testing
-
------ Test Results -----
-Total requests    : 10
-Successful        : 10
-Success rate      : 100.0%
-Avg confidence    : 92.4%
-
-Summary: 10/10 (100.0%) successful requests
-```
-
----
-
-## Docker Usage
-
-### Build the ML inference service image
-
+Check readiness:
 ```bash
-docker build -t ml-app:latest -f ml_app/Dockerfile .
-```
-
-### Build the dispatcher image
-
-```bash
-docker build -t dispatcher-app:latest -f dispatcher/Dockerfile .
-```
-
-### Verify images
-
-```bash
-docker images | grep -E "ml-app|dispatcher-app"
-```
-
----
-
-## Metrics
-
-The services expose runtime metrics for observability.
-
-### Dispatcher metrics
-
-| Metric                             | Description                    |
-| ---------------------------------- | ------------------------------ |
-| `dispatcher_requests`              | Total dispatcher HTTP requests |
-| `dispatcher_queue_size`            | Current dispatcher queue size  |
-| `dispatcher_cpu_usage_percent`     | Dispatcher CPU usage           |
-| `dispatcher_memory_usage_percent`  | Dispatcher memory usage        |
-| `dispatcher_response_time_seconds` | Dispatcher response latency    |
-
-### ML app metrics
-
-| Metric                         | Description                |
-| ------------------------------ | -------------------------- |
-| `ml_app_requests`              | Total ML app HTTP requests |
-| `ml_app_cpu_usage_percent`     | ML app CPU usage           |
-| `ml_app_memory_usage_percent`  | ML app memory usage        |
-| `ml_app_response_time_seconds` | ML app response latency    |
-
----
-
-## Verification
-
-Compile all Python files:
-
-```bash
-python3 -m py_compile \
-  ml_app/config.py \
-  ml_app/metrics.py \
-  ml_app/main.py \
-  ml_app/resnet_inference.py \
-  dispatcher/config.py \
-  dispatcher/metrics.py \
-  dispatcher/dispatcher.py \
-  dispatcher/workers.py \
-  dispatcher/main.py \
-  load_tester_config/load_tester.py
-```
-
-Run health checks:
-
-```bash
-curl http://localhost:8000/
+curl http://localhost:8000/healthz
 curl http://localhost:8001/
 ```
 
-Run an end-to-end prediction:
+---
+
+## Metrics Exposed
+
+**Dispatcher (port 9000)**
+
+| Metric | Type | Description |
+|---|---|---|
+| dispatcher_requests | Counter | Total HTTP requests received |
+| dispatcher_queue_size | Gauge | Current internal queue depth |
+| dispatcher_cpu_usage_percent | Gauge | Dispatcher CPU usage |
+| dispatcher_memory_usage_percent | Gauge | Dispatcher memory usage |
+| dispatcher_response_time_seconds | Histogram | End-to-end request latency — used by autoscaler |
+
+**ML App (port 9001)**
+
+| Metric | Type | Description |
+|---|---|---|
+| ml_app_requests | Counter | Total HTTP requests received |
+| ml_app_cpu_usage_percent | Gauge | ML App CPU usage |
+| ml_app_memory_usage_percent | Gauge | ML App memory usage |
+| ml_app_response_time_seconds | Histogram | Inference-only request latency |
+
+---
+
+## Debug Commands
 
 ```bash
-curl -X POST http://localhost:8001/add_to_queue \
-  -F "image=@imagenet-sample-images/n01440764_tench.JPEG"
+# Check all pods
+kubectl get pods -A
+
+# Check logs
+kubectl logs deployment/dispatcher-deployment --tail=20
+kubectl logs deployment/ml-app-deployment --tail=30
+kubectl logs deploy/custom-autoscaler-deployment --tail=30
+
+# Rebuild and restart a component
+docker build -t ml-app:latest -f ml-app/Dockerfile .
+kubectl rollout restart deployment ml-app-deployment
+
+# Query Prometheus manually
+curl -s "http://localhost:9090/api/v1/query?query=sum(rate(dispatcher_response_time_seconds_sum[15s]))/sum(rate(dispatcher_response_time_seconds_count[15s]))" | python3 -m json.tool
+
+# If Minikube is broken
+minikube delete --all --purge
+rm -rf ~/.minikube
 ```
 
 ---
 
-## Performance Notes
+## Known Issues and Fixes Applied
 
-The full workload can be demanding on a single CPU-only local machine. Under high load, the inference service may become the bottleneck because ResNet18 inference is computationally expensive on CPU.
-
-A lower success rate during heavy local load testing does not necessarily indicate a functional issue. It usually means that requests are timing out because the local machine cannot process the workload quickly enough.
-
-For local functional verification, a short workload such as 10 requests at 1 request per second is recommended.
+| # | Issue | Fix |
+|---|---|---|
+| 1 | Wrong env var name in dispatcher | `ML_API_ENDPOINT` renamed to `ML_SERVICE_URL` |
+| 2 | Prometheus DNS failure | Hardcoded monitoring namespace changed to default namespace URL |
+| 3 | ServiceAccount missing for autoscaler | Added `kubectl create serviceaccount` step |
+| 4 | Prometheus not scraping dispatcher | `targetPort 9090` corrected to `9000` in Service manifest |
+| 5 | Docker build failure (git missing) | Added `apt-get install -y git` to both Dockerfiles |
 
 ---
 
-## Status
+## Grafana Dashboard
 
-The project currently provides:
+URL: `http://localhost:3000/d/autoscaler-comparison`
+Login: admin / admin
 
-* A working FastAPI ResNet18 inference service
-* A modular dispatcher with asynchronous queueing
-* Background worker-based request forwarding
-* A configurable load tester
-* Docker support
-* Runtime metrics and latency instrumentation
-* Local verification commands
+---

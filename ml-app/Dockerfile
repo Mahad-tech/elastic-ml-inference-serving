@@ -8,7 +8,7 @@ ENV MKL_NUM_THREADS=1
 ENV TORCH_NUM_THREADS=1
 
 COPY requirements.txt .
-COPY ml_app/*.py .
+COPY ml-app/*.py .
 
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
